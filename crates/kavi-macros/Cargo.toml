@@ -1,0 +1,26 @@
+[package]
+name = "kavi-macros"
+description = "Proc-macros for the Kavi web framework"
+repository.workspace = true
+readme = "README.md"
+authors.workspace = true
+license.workspace = true
+
+version.workspace = true
+
+categories = [
+    "web-programming",
+    "development-tools::procedural-macro-helpers",
+]
+keywords = ["kavi", "macros", "web"]
+
+rust-version.workspace = true
+edition.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full"] }

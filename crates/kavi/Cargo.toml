@@ -1,0 +1,23 @@
+[package]
+name = "kavi"
+description = "Compose beautiful web apps in async rust"
+repository.workspace = true
+readme = "README.md"
+authors.workspace = true
+license.workspace = true
+
+version.workspace = true
+
+categories = [
+    "web-programming",
+    "asynchronous",
+    "database",
+]
+keywords = ["web", "framework", "fullstack", "async", "orm"]
+
+rust-version.workspace = true
+edition.workspace = true
+
+[dependencies]
+vakya = { version = "0.1.0-alpha.1", features = ["client", "server"] }
+karmaio = { version = "0.1.0", features = ["macros", "net", "bytes", "fs"] }

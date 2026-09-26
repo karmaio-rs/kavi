@@ -1,14 +1,12 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! Core building blocks for the Kavi web framework on Karmaio.
+//!
+//! HTTP messages, extractors, and response helpers live in [`http`].
+//! [`Error`] and [`Result`] provide the shared framework error contract.
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#![forbid(unsafe_code)]
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub mod foundation;
+pub mod http;
+pub(crate) mod support;
+
+pub use foundation::Error;

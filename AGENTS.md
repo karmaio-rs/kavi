@@ -53,8 +53,8 @@ In case the above guidelines don't cover something, default to standard rust con
 
 ### Error Handling
 
-- Use `std::io::Result<T>` for std I/O operations
-- Use `(std::io::Result<T>, B)` tuples for buffer-based I/O operations (`BufResult`)
+- Use `std::io::Result<T, E>` for std I/O operations
+- Use `(std::io::Result<T, E>, B)` tuples for buffer-based I/O operations (`BufResult`)
 - Propagate errors with `?` operator
 - Document error conditions in doc comments
 

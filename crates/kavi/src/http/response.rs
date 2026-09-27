@@ -13,6 +13,31 @@ use crate::{
     http::{Body, Response},
 };
 
+use super::cookies::ResponseCookies;
+
+/// Response extension helpers.
+///
+/// Import this trait alongside [`Response`] to access the methods
+pub trait ResponseExt {
+    /// Borrows the outgoing store, if one has been initialized.
+    fn cookies(&self) -> Option<&ResponseCookies<'static>>;
+
+    /// Borrows the outgoing store, initializing an empty one when necessary.
+    fn cookies_mut(&mut self) -> &mut ResponseCookies<'static>;
+}
+
+impl ResponseExt for Response {
+    #[inline]
+    fn cookies(&self) -> Option<&ResponseCookies<'static>> {
+        self.extensions().get()
+    }
+
+    #[inline]
+    fn cookies_mut(&mut self) -> &mut ResponseCookies<'static> {
+        self.extensions_mut().get_or_insert_default()
+    }
+}
+
 /// Creates an empty response with the supplied HTTP status.
 #[inline]
 pub fn empty(status: StatusCode) -> Response {

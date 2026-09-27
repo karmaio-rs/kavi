@@ -4,6 +4,7 @@ use std::net::SocketAddr;
 
 use super::{
     Request,
+    cookies::{self, CookieError, RequestCookies},
     extract::{FromRequestBody, FromRequestHead, ParamError, QueryError},
 };
 
@@ -107,6 +108,17 @@ pub trait RequestExt {
     /// Returns [`QueryError`] when deserialization fails.
     fn query<T: DeserializeOwned>(&self) -> Result<T, QueryError>;
 
+    /// Parses incoming cookies using the request's configured cookie processor.
+    ///
+    /// The collection borrows the request headers where possible and preserves
+    /// duplicate names. A [`cookies::Processor`] in request extensions overrides
+    /// Biscotti's default processor. Outgoing cookies are held separately.
+    ///
+    /// # Errors
+    /// Returns [`CookieError`] when a header is unreadable or cookie parsing,
+    /// decoding, or cryptographic processing fails.
+    fn cookies(&self) -> Result<RequestCookies<'_>, CookieError>;
+
     /// Runs an asynchronous metadata extractor.
     ///
     /// The request is borrowed immutably. Its head, extensions, and body remain
@@ -173,6 +185,11 @@ impl RequestExt for Request {
     #[inline]
     fn query<T: DeserializeOwned>(&self) -> Result<T, QueryError> {
         serde_qs::from_str(self.uri().query().unwrap_or("")).map_err(QueryError::from)
+    }
+
+    #[inline]
+    fn cookies(&self) -> Result<RequestCookies<'_>, CookieError> {
+        cookies::from_headers(self)
     }
 
     #[inline]

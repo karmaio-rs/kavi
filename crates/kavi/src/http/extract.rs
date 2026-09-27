@@ -256,7 +256,9 @@ impl FromRequestHead for RawHeaders {
 /// Extraction may await I/O, such as authentication or tenant lookup,
 /// while borrowing the request immutably and preserving the body.
 ///
-/// Built-in implementations include [`Query`], [`Path`], and [`RawHeaders`]. JSON extraction consumes the body instead.
+/// Built-in implementations include [`Query`], [`Path`], and [`RawHeaders`].
+/// Read borrowed cookies through [`super::RequestExt::cookies`].
+/// JSON extraction consumes the body instead.
 /// See [`FromRequestBody`] for body-consuming extractors.
 ///
 /// # Implementing

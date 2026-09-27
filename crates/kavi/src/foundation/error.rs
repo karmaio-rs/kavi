@@ -4,6 +4,7 @@ use vakya::body::CollectError;
 
 use crate::http::{
     Body, Response, StatusCode,
+    cookies::CookieError,
     extract::{BodyError, FormError, JsonError, ParamError, PathError, QueryError, TextError},
 };
 
@@ -205,6 +206,13 @@ impl From<ParamError> for Error {
 impl From<QueryError> for Error {
     #[inline]
     fn from(source: QueryError) -> Self {
+        Self::with_status(StatusCode::BAD_REQUEST, source)
+    }
+}
+
+impl From<CookieError> for Error {
+    #[inline]
+    fn from(source: CookieError) -> Self {
         Self::with_status(StatusCode::BAD_REQUEST, source)
     }
 }

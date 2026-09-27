@@ -3,10 +3,12 @@
 //! [`Request`] and [`Response`] use Kavi's canonical [`Body`]. Import
 //! [`RequestExt`] alongside [`Request`] to access metadata and run extractors.
 //! [`extract`] contains extractor traits, values, and their typed errors;
-//! [`response`] contains helpers for constructing responses. Streaming
-//! integration types are available in [`body`].
+//! [`response`] contains helpers for constructing responses. [`cookies`]
+//! provides Biscotti's server-side cookie API. [`ResponseExt`] provides access
+//! to the outgoing cookie store; streaming messages use [`Body`].
 
 mod body;
+pub mod cookies;
 pub mod extract;
 pub mod response;
 
@@ -27,3 +29,4 @@ pub use http::response::{Builder as ResponseBuilder, Parts as ResponseParts};
 
 pub use body::Body;
 pub use request::{ConnectionInfo, RequestExt, RoutingInfo};
+pub use response::ResponseExt;

@@ -33,7 +33,7 @@ vakya = { version = "0.1.0-alpha.1", features = ["client", "server"] }
 # Type Dependencies
 thiserror = { version = "2" }
 mime = "0.3"
-cookie = "0.18"
+biscotti = "0.4.3"
 httparse = "1.10"
 
 [dev-dependencies]

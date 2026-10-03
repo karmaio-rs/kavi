@@ -5,8 +5,9 @@
 
 #![forbid(unsafe_code)]
 
+pub mod dispatch;
 pub mod foundation;
 pub mod http;
-pub(crate) mod support;
+pub mod support;
 
 pub use foundation::Error;

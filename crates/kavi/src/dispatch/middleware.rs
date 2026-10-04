@@ -11,8 +11,9 @@ use super::{DispatchFuture, Next};
 ///
 /// Call [`Next::run`] to transfer the owned request to the remainder at most once,
 /// or return directly to short-circuit. The continuation always includes a
-/// terminal controller. Async functions and reusable async closures automatically
-/// implement this trait when they accept a [`Request`] and a [`Next`] and return
+/// terminal controller or routing error. Async functions
+/// and reusable async closures automatically implement this trait when they
+/// accept a [`Request`] and a [`Next`] and return
 /// [`Result<Response, Error>`].
 ///
 /// A middleware instance must own its dependencies or borrow them for `'static`.

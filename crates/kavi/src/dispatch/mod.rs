@@ -3,7 +3,8 @@
 //! A [`Controller`] handles one owned request. A [`Middleware`] can modify the
 //! request before passing it to [`Next::run`], inspect the returned response or
 //! error, or return early to short-circuit the chain. Each continuation ends in
-//! a controller, even when no middleware remains.
+//! a selected controller or routing error, even when no
+//! middleware remains.
 //!
 //! Middleware and controllers may borrow their captured dependencies during a
 //! call. Their futures need not be `Send`, and errors remain fallible until an
@@ -23,6 +24,7 @@ pub use next::Next;
 
 pub(crate) use controller::ErasedController;
 pub(crate) use middleware::ErasedMiddleware;
+pub(crate) use next::Terminal;
 
 /// A borrowed local future used only at dispatch's dynamic storage boundary.
 pub(crate) type DispatchFuture<'a> = Pin<Box<dyn Future<Output = Result<Response, Error>> + 'a>>;

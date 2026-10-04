@@ -81,12 +81,13 @@ impl<'de> de::Deserializer<'de> for Scalar<'de> {
 }
 
 /// Deserializes ordered name/value pairs as a map, sequence, or single scalar.
-pub(crate) struct Pairs<'a>(pub(crate) &'a [(String, String)]);
+pub(crate) struct Pairs<I>(pub(crate) I);
 
 macro_rules! scalar {
     ($($method:ident);* $(;)?) => {
-        $(fn $method<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
-            if let [(_, value)] = self.0 {
+        $(fn $method<V: Visitor<'de>>(mut self, visitor: V) -> Result<V::Value, Error> {
+            if self.0.len() == 1 {
+                let (_, value) = self.0.next().expect("one value");
                 de::Deserializer::$method(Scalar(value), visitor)
             } else {
                 Err(de::Error::custom("a scalar requires exactly one value"))
@@ -95,7 +96,7 @@ macro_rules! scalar {
     };
 }
 
-impl<'de> de::Deserializer<'de> for Pairs<'de> {
+impl<'de, I: ExactSizeIterator<Item = (&'de str, &'de str)>> de::Deserializer<'de> for Pairs<I> {
     type Error = Error;
 
     fn deserialize_any<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
@@ -104,7 +105,7 @@ impl<'de> de::Deserializer<'de> for Pairs<'de> {
 
     fn deserialize_map<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
         visitor.visit_map(PairAccess {
-            values: self.0.iter(),
+            values: self.0,
             pending: None,
         })
     }
@@ -119,11 +120,11 @@ impl<'de> de::Deserializer<'de> for Pairs<'de> {
     }
 
     fn deserialize_seq<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
-        visitor.visit_seq(Values(self.0.iter()))
+        visitor.visit_seq(Values(self.0))
     }
 
     fn deserialize_tuple<V: Visitor<'de>>(self, _: usize, visitor: V) -> Result<V::Value, Error> {
-        let mut values = Values(self.0.iter());
+        let mut values = Values(self.0);
         let result = visitor.visit_seq(&mut values)?;
         if values.0.next().is_some() {
             return Err(de::Error::custom("too many values for tuple"));
@@ -149,7 +150,7 @@ impl<'de> de::Deserializer<'de> for Pairs<'de> {
     }
 
     fn deserialize_unit<V: Visitor<'de>>(self, visitor: V) -> Result<V::Value, Error> {
-        if self.0.is_empty() {
+        if self.0.len() == 0 {
             visitor.visit_unit()
         } else {
             Err(de::Error::custom("expected no values"))
@@ -161,12 +162,13 @@ impl<'de> de::Deserializer<'de> for Pairs<'de> {
     }
 
     fn deserialize_enum<V: Visitor<'de>>(
-        self,
+        mut self,
         name: &'static str,
         variants: &'static [&'static str],
         visitor: V,
     ) -> Result<V::Value, Error> {
-        if let [(_, value)] = self.0 {
+        if self.0.len() == 1 {
+            let (_, value) = self.0.next().expect("one value");
             de::Deserializer::deserialize_enum(Scalar(value), name, variants, visitor)
         } else {
             Err(de::Error::custom("an enum requires exactly one value"))
@@ -183,19 +185,19 @@ impl<'de> de::Deserializer<'de> for Pairs<'de> {
     serde::forward_to_deserialize_any! { identifier ignored_any }
 }
 
-struct PairAccess<'a> {
-    values: std::slice::Iter<'a, (String, String)>,
+struct PairAccess<'a, I> {
+    values: I,
     pending: Option<&'a str>,
 }
 
-impl<'de> MapAccess<'de> for PairAccess<'de> {
+impl<'de, I: ExactSizeIterator<Item = (&'de str, &'de str)>> MapAccess<'de> for PairAccess<'de, I> {
     type Error = Error;
 
     fn next_key_seed<K: DeserializeSeed<'de>>(&mut self, seed: K) -> Result<Option<K::Value>, Error> {
         match self.values.next() {
             Some((key, value)) => {
                 self.pending = Some(value);
-                seed.deserialize(key.as_str().into_deserializer()).map(Some)
+                seed.deserialize(key.into_deserializer()).map(Some)
             }
             None => Ok(None),
         }
@@ -205,11 +207,15 @@ impl<'de> MapAccess<'de> for PairAccess<'de> {
         let value = self.pending.take().ok_or_else(|| de::Error::custom("missing value"))?;
         seed.deserialize(Scalar(value))
     }
+
+    fn size_hint(&self) -> Option<usize> {
+        Some(self.values.len())
+    }
 }
 
-struct Values<'a>(std::slice::Iter<'a, (String, String)>);
+struct Values<I>(I);
 
-impl<'de> SeqAccess<'de> for Values<'de> {
+impl<'de, I: ExactSizeIterator<Item = (&'de str, &'de str)>> SeqAccess<'de> for Values<I> {
     type Error = Error;
 
     fn next_element_seed<T: DeserializeSeed<'de>>(&mut self, seed: T) -> Result<Option<T::Value>, Error> {
@@ -217,5 +223,9 @@ impl<'de> SeqAccess<'de> for Values<'de> {
             .next()
             .map(|(_, value)| seed.deserialize(Scalar(value)))
             .transpose()
+    }
+
+    fn size_hint(&self) -> Option<usize> {
+        Some(self.0.len())
     }
 }

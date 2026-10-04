@@ -27,6 +27,7 @@ pub type Response = http::Response<Body>;
 pub use http::request::{Builder as RequestBuilder, Parts as RequestParts};
 pub use http::response::{Builder as ResponseBuilder, Parts as ResponseParts};
 
+pub use crate::routing::RouteParams;
 pub use body::Body;
 pub use request::{ConnectionInfo, RequestExt, RoutingInfo};
 pub use response::ResponseExt;

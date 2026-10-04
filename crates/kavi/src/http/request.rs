@@ -1,6 +1,8 @@
 use http::uri::Scheme;
 use serde::de::DeserializeOwned;
-use std::net::SocketAddr;
+use std::{net::SocketAddr, ops::Range};
+
+use crate::routing::{Param, RouteParams};
 
 use super::{
     Request,
@@ -22,33 +24,72 @@ pub struct ConnectionInfo {
 
 /// Request routing metadata inserted before route middleware and the controller.
 ///
-/// The pattern, name, and decoded captures are owned by this request.
-/// Cloning the metadata copies those values.
+/// Captures borrow an owned snapshot of the original URI when decoding is
+/// unnecessary. Encoded captures own their decoded strings. Route labels share
+/// one owned buffer. Changing the request URI does not change these parameters.
+/// Cloning copies labels and decoded strings and clones the URI snapshot.
 #[derive(Clone, Debug)]
 pub struct RoutingInfo {
-    path: String,
-    name: Option<String>,
-    params: Vec<(String, String)>,
+    uri: Option<super::Uri>,
+    labels: String,
+    path: Range<usize>,
+    name: Option<Range<usize>>,
+    params: Vec<Param>,
 }
 
 impl RoutingInfo {
-    pub(crate) fn new(path: String, name: Option<String>, params: Vec<(String, String)>) -> Self {
-        Self { path, name, params }
+    pub(crate) fn new<'a>(
+        uri: &super::Uri,
+        path: &str,
+        name: Option<&str>,
+        names: impl ExactSizeIterator<Item = &'a str> + Clone,
+        mut params: Vec<Param>,
+    ) -> Self {
+        debug_assert_eq!(names.len(), params.len());
+        let uri = params.iter().any(Param::borrows_path).then(|| uri.clone());
+        let capacity = path.len() + name.map_or(0, str::len) + names.clone().map(str::len).sum::<usize>();
+        let mut labels = String::with_capacity(capacity);
+        labels.push_str(path);
+        let path = 0..labels.len();
+        let name = name.map(|name| {
+            let start = labels.len();
+            labels.push_str(name);
+            start..labels.len()
+        });
+        for (name, param) in names.zip(&mut params) {
+            let start = labels.len();
+            labels.push_str(name);
+            param.name = start..labels.len();
+        }
+        Self {
+            uri,
+            labels,
+            path,
+            name,
+            params,
+        }
     }
 
     /// Returns decoded path captures in recognition order.
-    pub fn params(&self) -> &[(String, String)] {
-        &self.params
+    #[inline]
+    pub fn params(&self) -> RouteParams<'_> {
+        RouteParams::new(
+            self.uri.as_ref().map_or("", super::Uri::path),
+            &self.labels,
+            &self.params,
+        )
     }
 
     /// Returns the full matched path pattern.
+    #[inline]
     pub fn matched_path(&self) -> &str {
-        &self.path
+        &self.labels[self.path.clone()]
     }
 
     /// Returns the fully qualified route name, when assigned.
+    #[inline]
     pub fn route_name(&self) -> Option<&str> {
-        self.name.as_deref()
+        self.name.as_ref().map(|range| &self.labels[range.clone()])
     }
 
     /// Returns the value of a single path parameter.
@@ -59,8 +100,7 @@ impl RoutingInfo {
     /// or [`ParamError::Deserialize`] if conversion into `T` fails.
     pub fn param<T: DeserializeOwned>(&self, name: &str) -> Result<T, ParamError> {
         self.params()
-            .iter()
-            .find(|(k, _)| k == name)
+            .find(|(k, _)| *k == name)
             .map(|(_, v)| v)
             .ok_or_else(|| ParamError::Missing { name: name.to_owned() })
             .and_then(|v| {
@@ -93,7 +133,10 @@ pub trait RequestExt {
     fn route_name(&self) -> Option<&str>;
 
     /// Returns the route parameters decoded exactly once by the router.
-    fn route_params(&self) -> &[(String, String)];
+    ///
+    /// Iterate borrowed pairs directly with `for (name, value) in request.route_params()`.
+    /// Values remain those selected from the original URI, even after URI changes.
+    fn route_params(&self) -> RouteParams<'_>;
 
     /// Deserializes a captured path parameter by name.
     ///
@@ -167,11 +210,11 @@ impl RequestExt for Request {
     }
 
     #[inline]
-    fn route_params(&self) -> &[(String, String)] {
+    fn route_params(&self) -> RouteParams<'_> {
         self.extensions()
             .get::<RoutingInfo>()
             .map(RoutingInfo::params)
-            .unwrap_or(&[])
+            .unwrap_or_default()
     }
 
     #[inline]

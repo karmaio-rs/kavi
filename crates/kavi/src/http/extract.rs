@@ -4,6 +4,8 @@
 //! [`FromRequestBody`] receives the remaining body by ownership. Invoke them
 //! through [`super::RequestExt::extract_head`] and [`super::RequestExt::extract_body`].
 //! Extractor failures remain typed and can be converted into [`crate::Error`].
+//!
+//! Streaming form uploads use [`super::multipart::Multipart`].
 
 use serde::de::DeserializeOwned;
 
@@ -294,7 +296,7 @@ pub trait FromRequestHead: Sized {
 /// The request is borrowed immutably for metadata.
 /// When invoked through [`super::RequestExt::extract_body`], the request body has already been replaced with an empty body.
 ///
-/// Built-in implementations include [`Json`], [`Form`], [`Bytes`], and [`Text`].
+/// Built-in implementations include [`Json`], [`Form`], [`Bytes`], [`Text`], and [`super::multipart::Multipart`].
 ///
 /// # Implementing
 ///

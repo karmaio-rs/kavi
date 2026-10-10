@@ -6,10 +6,12 @@
 //! [`response`] contains helpers for constructing responses. [`cookies`]
 //! provides Biscotti's server-side cookie API. [`ResponseExt`] provides access
 //! to the outgoing cookie store; streaming messages use [`Body`].
+//! [`multipart`] provides streaming form uploads with typed errors and limits.
 
 mod body;
 pub mod cookies;
 pub mod extract;
+pub mod multipart;
 pub mod response;
 
 mod request;

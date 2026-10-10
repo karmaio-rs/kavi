@@ -6,6 +6,7 @@ use crate::http::{
     Body, Response, StatusCode,
     cookies::CookieError,
     extract::{BodyError, FormError, JsonError, ParamError, PathError, QueryError, TextError},
+    multipart::MultipartError,
 };
 
 /// A dispatch failure with an HTTP status and an optional typed source.
@@ -157,6 +158,27 @@ impl From<FormError> for Error {
             FormError::WrongContentType => StatusCode::UNSUPPORTED_MEDIA_TYPE,
             FormError::Deserialize(_) => StatusCode::BAD_REQUEST,
             FormError::Body(error) => collection_status(error),
+        };
+        Self::with_status(status, source)
+    }
+}
+
+impl From<MultipartError> for Error {
+    #[inline]
+    fn from(source: MultipartError) -> Self {
+        let status = match &source {
+            MultipartError::NoMultipart | MultipartError::DecodeContentType(_) => StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            MultipartError::FieldSizeExceeded { .. }
+            | MultipartError::StreamSizeExceeded { .. }
+            | MultipartError::PreambleSizeExceeded { .. }
+            | MultipartError::HeadersSizeExceeded { .. }
+            | MultipartError::BoundaryPaddingSizeExceeded { .. }
+            | MultipartError::FieldCountExceeded { .. }
+            | MultipartError::ReadHeaderFailed(httparse::Error::TooManyHeaders) => StatusCode::PAYLOAD_TOO_LARGE,
+            MultipartError::StreamReadFailed(_) | MultipartError::Write(_) | MultipartError::Terminated => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
+            _ => StatusCode::BAD_REQUEST,
         };
         Self::with_status(status, source)
     }

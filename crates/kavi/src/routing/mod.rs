@@ -1,20 +1,28 @@
 //! Method-aware routing, constraints, grouped middleware, and URL generation.
 //!
 //! [`Router`] collects declarations and [`Router::build`] validates them into an
-//! immutable [`RoutingTable`]. Direct method registration returns a borrowed
-//! [`Route`] for configuration. [`Group`] supplies inherited path and name
-//! prefixes, capture constraints, and middleware. The Kavi-owned radix matcher
+//! immutable [`RoutingTable`]. Direct method registration returns a [`Route`]
+//! configuration handle. [`Group`] supplies inherited path and name
+//! prefixes and capture constraints. Register group middleware inside the group
+//! closure. The Kavi-owned radix matcher
 //! uses structural specificity within the requested method. At an equivalent
 //! structure, more constrained candidates precede plain captures; ties follow
 //! registration order. Constraints inspect once-decoded capture values.
 //!
 //! Middleware enters in table, outer group, inner group, and route order, then
 //! reaches the controller. Code after the continuation returns unwinds in reverse.
-//! Group and route middleware run only on valid selected routes; table middleware
-//! also wraps fallbacks, misses, and routing errors. Controllers and middleware
-//! are owned once and may be local to a worker.
+//! Group and route middleware run only on valid selected routes. Merged routers
+//! preserve their middleware around imported endpoints, including their fallback.
+//! The outer table's middleware also wraps misses and routing errors. Controllers
+//! and middleware are owned once and may be local to a worker.
 //! Register table middleware with [`Router::middleware`] before building. The
 //! compiler flattens all middleware levels into one ordered chain per endpoint.
+//! `Router<S>` declares the application context required by its controllers and
+//! middleware. Registration checks provider bounds; [`Router::build_with_dependencies`]
+//! binds one application-owned `Rc<S>` across all declarations, including groups
+//! and merges. Retain that context outside routing for jobs, tasks, and resource
+//! shutdown. [`Router::build`] compiles declarations requiring no dependencies.
+//! The compiled table erases dependency types after binding.
 //! String routes and optional [`TypedPath`] values share the same runtime
 //! pattern representation, encoding, and constraint semantics. Both declaration
 //! styles accept Unicode literals and preserve valid percent escapes.
@@ -60,8 +68,7 @@
 //! Behavioral coverage is deferred for grammar errors, literal and capture
 //! encoding, capture counts beyond 25, constraint ordering and backtracking,
 //! tuple extraction beneath groups, HEAD/405 behavior, middleware and fallbacks,
-//! and typed/untyped generation consistency. The `typed_paths` example is
-//! checked without executing it; the full coverage list is in `UPSTREAM.md`.
+//! and typed/untyped generation consistency. The full coverage list is in `UPSTREAM.md`.
 
 mod error;
 mod group;

@@ -6,6 +6,8 @@ use quote::quote;
 use regex_syntax::hir::{Hir, Look};
 use syn::{Data, DeriveInput, Fields, Index, LitStr, Member, Path, Token, ext::IdentExt, parse_quote};
 
+use crate::generics::Names;
+
 const LITERAL: &AsciiSet = &CONTROLS
     .add(b' ')
     .add(b'"')
@@ -26,6 +28,11 @@ enum Part {
 }
 
 pub(super) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
+    let mut names = Names::new(&input);
+    let request_lifetime = names.fresh_lifetime("__kavi_request_lifetime");
+    let context_lifetime = names.fresh_lifetime("__kavi_context_lifetime");
+    let context = names.fresh("__KaviExtractContext");
+    let request = names.fresh("__kavi_request");
     let mut attributes = input.attrs.iter().filter(|attr| attr.path().is_ident("typed_path"));
     let attr = attributes
         .next()
@@ -163,7 +170,7 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     let values = captures
         .iter()
         .zip(&field_types)
-        .map(|(name, ty)| quote!(#crate_path::http::RequestExt::param::<#ty>(request, #name)?))
+        .map(|(name, ty)| quote!(#crate_path::http::RequestExt::param::<#ty>(#request, #name)?))
         .collect::<Vec<_>>();
     let construct = match fields {
         Fields::Named(_) => quote!(Self { #(#members: #values),* }),
@@ -173,10 +180,13 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
     let (request, error) = if captures.is_empty() {
         (quote!(_), quote!(::std::convert::Infallible))
     } else {
-        (quote!(request), quote!(#crate_path::http::extract::ParamError))
+        (quote!(#request), quote!(#crate_path::http::extract::ParamError))
     };
     let mut display_generics = input.generics.clone();
     let mut extract_generics = input.generics.clone();
+    extract_generics.params.insert(0, parse_quote!(#context_lifetime));
+    extract_generics.params.insert(0, parse_quote!(#request_lifetime));
+    extract_generics.params.push(parse_quote!(#context: ?Sized));
     for ty in field_types {
         display_generics
             .make_where_clause()
@@ -226,11 +236,16 @@ pub(super) fn expand(input: DeriveInput) -> syn::Result<TokenStream> {
         }
 
         #[automatically_derived]
-        impl #extract_impl #crate_path::http::extract::FromRequestHead for #name #type_generics #extract_where {
+        impl #extract_impl #crate_path::http::extract::FromRequestHead<#request_lifetime, #context_lifetime, #context>
+            for #name #type_generics #extract_where
+        {
             type Error = #error;
 
             #[inline]
-            async fn from_head(#request: &#crate_path::http::Request) -> ::std::result::Result<Self, Self::Error> {
+            async fn from_head(
+                #request: &#request_lifetime #crate_path::http::Request,
+                _: &#context_lifetime #context,
+            ) -> ::std::result::Result<Self, Self::Error> {
                 ::std::result::Result::Ok(#construct)
             }
         }

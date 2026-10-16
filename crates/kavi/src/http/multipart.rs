@@ -58,9 +58,9 @@ impl Default for MultipartLimits {
     }
 }
 
-impl Middleware for MultipartLimits {
+impl<S> Middleware<S> for MultipartLimits {
     #[inline]
-    async fn handle(&self, mut request: Request, next: Next<'_>) -> Result<Response, Error> {
+    async fn handle(&self, mut request: Request, next: Next<'_>, _: &S) -> Result<Response, Error> {
         request.extensions_mut().insert(*self);
         next.run(request).await
     }
@@ -84,10 +84,10 @@ pub struct Multipart {
     parser: parser::Multipart,
 }
 
-impl FromRequestBody for Multipart {
+impl<'r, 's, S: ?Sized> FromRequestBody<'r, 's, S> for Multipart {
     type Error = MultipartError;
 
-    async fn from_body(request: &Request, body: Body) -> Result<Self, Self::Error> {
+    async fn from_body(request: &'r Request, body: Body, _: &'s S) -> Result<Self, Self::Error> {
         let content_type = request
             .headers()
             .get(http::header::CONTENT_TYPE)

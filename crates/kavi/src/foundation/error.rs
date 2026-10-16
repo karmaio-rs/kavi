@@ -3,7 +3,7 @@ use std::{convert::Infallible, error::Error as StdError, fmt, io};
 use vakya::body::CollectError;
 
 use crate::http::{
-    Body, Response, StatusCode,
+    Body, MetadataError, Response, StatusCode,
     cookies::CookieError,
     extract::{BodyError, FormError, JsonError, ParamError, PathError, QueryError, TextError},
     multipart::MultipartError,
@@ -113,6 +113,13 @@ impl From<io::Error> for Error {
     #[inline]
     fn from(source: io::Error) -> Self {
         Self::internal(source)
+    }
+}
+
+impl From<MetadataError> for Error {
+    #[inline]
+    fn from(source: MetadataError) -> Self {
+        Self::with_status(StatusCode::BAD_REQUEST, source)
     }
 }
 

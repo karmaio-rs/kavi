@@ -4,10 +4,24 @@
 //! [`FromRequestBody`] receives the remaining body by ownership. Invoke them
 //! through [`super::RequestExt::extract_head`] and [`super::RequestExt::extract_body`].
 //! Extractor failures remain typed and can be converted into [`crate::Error`].
+//! Service-aware calls use [`super::RequestExt::extract_head_with`] and
+//! [`super::RequestExt::extract_body_with`] with an explicit borrowed service or
+//! dependency root. Extractors may await resource acquisition or validation.
+//! Neither the context nor the extractor future needs to be `Send` or `Sync`.
+//!
+//! Request and context lifetimes are independent. Outputs may borrow metadata
+//! from the request, services from the context, or both. A request borrow prevents
+//! moving or mutating the request while that borrow remains in use. Independent
+//! lifetimes let context-only outputs avoid prolonging the request borrow;
+//! relationships imposed by custom implementations are still enforced by Rust.
+//! Body extractors
+//! may borrow metadata or context, but must own data from their consumed body.
 //!
 //! Streaming form uploads use [`super::multipart::Multipart`].
 
 use serde::de::DeserializeOwned;
+
+use crate::dispatch::Provide;
 
 use super::{
     Body, HeaderMap, Request, RoutingInfo,
@@ -41,10 +55,10 @@ pub enum JsonError {
     Deserialize(#[from] serde_json::Error),
 }
 
-impl<T: DeserializeOwned> FromRequestBody for Json<T> {
+impl<'r, 's, T: DeserializeOwned, S: ?Sized> FromRequestBody<'r, 's, S> for Json<T> {
     type Error = JsonError;
 
-    async fn from_body(request: &Request, body: Body) -> Result<Self, Self::Error> {
+    async fn from_body(request: &'r Request, body: Body, _: &'s S) -> Result<Self, Self::Error> {
         // Check content type
         let content_type = request
             .headers()
@@ -91,10 +105,10 @@ pub enum FormError {
     Deserialize(#[from] serde_qs::Error),
 }
 
-impl<T: DeserializeOwned> FromRequestBody for Form<T> {
+impl<'r, 's, T: DeserializeOwned, S: ?Sized> FromRequestBody<'r, 's, S> for Form<T> {
     type Error = FormError;
 
-    async fn from_body(request: &Request, body: Body) -> Result<Self, Self::Error> {
+    async fn from_body(request: &'r Request, body: Body, _: &'s S) -> Result<Self, Self::Error> {
         let content_type = request
             .headers()
             .get(http::header::CONTENT_TYPE)
@@ -140,11 +154,11 @@ pub enum PathError {
     Deserialize(#[from] serde::de::value::Error),
 }
 
-impl<T: DeserializeOwned> FromRequestHead for Path<T> {
+impl<'r, 's, T: DeserializeOwned, S: ?Sized> FromRequestHead<'r, 's, S> for Path<T> {
     type Error = PathError;
 
     #[inline]
-    async fn from_head(request: &Request) -> Result<Self, Self::Error> {
+    async fn from_head(request: &'r Request, _: &'s S) -> Result<Self, Self::Error> {
         let params = request.extensions().get::<RoutingInfo>().ok_or(PathError::Missing)?;
         let value = T::deserialize(crate::support::serde::Pairs(params.params()))?;
         Ok(Path(value))
@@ -168,11 +182,11 @@ pub enum QueryError {
     Deserialize(#[from] serde_qs::Error),
 }
 
-impl<T: DeserializeOwned> FromRequestHead for Query<T> {
+impl<'r, 's, T: DeserializeOwned, S: ?Sized> FromRequestHead<'r, 's, S> for Query<T> {
     type Error = QueryError;
 
     #[inline]
-    async fn from_head(request: &Request) -> Result<Self, Self::Error> {
+    async fn from_head(request: &'r Request, _: &'s S) -> Result<Self, Self::Error> {
         let query = request.uri().query().unwrap_or("");
         let value = serde_qs::from_str(query)?;
         Ok(Query(value))
@@ -197,10 +211,10 @@ pub enum BodyError {
     Collect(#[from] CollectError<BodySourceError>),
 }
 
-impl FromRequestBody for Bytes {
+impl<'r, 's, S: ?Sized> FromRequestBody<'r, 's, S> for Bytes {
     type Error = BodyError;
 
-    async fn from_body(_request: &Request, body: Body) -> Result<Self, Self::Error> {
+    async fn from_body(_request: &'r Request, body: Body, _: &'s S) -> Result<Self, Self::Error> {
         let collected = body.collect(DEFAULT_BODY_LIMIT).await?;
         Ok(Bytes(collected.bytes().clone()))
     }
@@ -228,10 +242,10 @@ pub enum TextError {
     Utf8(#[from] std::str::Utf8Error),
 }
 
-impl FromRequestBody for Text {
+impl<'r, 's, S: ?Sized> FromRequestBody<'r, 's, S> for Text {
     type Error = TextError;
 
-    async fn from_body(_request: &Request, body: Body) -> Result<Self, Self::Error> {
+    async fn from_body(_request: &'r Request, body: Body, _: &'s S) -> Result<Self, Self::Error> {
         let collected = body.collect(DEFAULT_BODY_LIMIT).await?;
         let s = std::str::from_utf8(collected.bytes())?;
         Ok(Text(s.to_owned()))
@@ -240,15 +254,42 @@ impl FromRequestBody for Text {
 
 /// Extracts the raw [`HeaderMap`] from the request.
 ///
-/// This clones the headers; use [`Request::headers`] to borrow them directly.
-pub struct RawHeaders(pub HeaderMap);
+/// The default `RawHeaders` clones the headers. `RawHeaders<&HeaderMap>` borrows
+/// them for the request lifetime without cloning. Both ignore the supplied context.
+pub struct RawHeaders<T = HeaderMap>(pub T);
 
-impl FromRequestHead for RawHeaders {
+impl<'r, 's, S: ?Sized> FromRequestHead<'r, 's, S> for RawHeaders {
     type Error = std::convert::Infallible;
 
     #[inline]
-    async fn from_head(request: &Request) -> Result<Self, Self::Error> {
+    async fn from_head(request: &'r Request, _: &'s S) -> Result<Self, Self::Error> {
         Ok(Self(request.headers().clone()))
+    }
+}
+
+impl<'r, 's, S: ?Sized> FromRequestHead<'r, 's, S> for RawHeaders<&'r HeaderMap> {
+    type Error = std::convert::Infallible;
+
+    #[inline]
+    async fn from_head(request: &'r Request, _: &'s S) -> Result<Self, Self::Error> {
+        Ok(Self(request.headers()))
+    }
+}
+
+/// Borrows an existing service from an explicitly supplied dependency root.
+///
+/// Uses [`Provide`] to project the exact type `T`, including unsized trait-object
+/// views. This requires neither cloning nor thread-safe services. The result
+/// borrows only the supplied context and does not retain the extractor's request borrow.
+/// Acquisition and validation belong in custom service-aware extractors.
+pub struct Dependency<'s, T: ?Sized>(pub &'s T);
+
+impl<'r, 's, T: ?Sized, S: Provide<T> + ?Sized> FromRequestHead<'r, 's, S> for Dependency<'s, T> {
+    type Error = std::convert::Infallible;
+
+    #[inline]
+    async fn from_head(_: &'r Request, context: &'s S) -> Result<Self, Self::Error> {
+        Ok(Self(context.provide()))
     }
 }
 
@@ -258,34 +299,28 @@ impl FromRequestHead for RawHeaders {
 /// Extraction may await I/O, such as authentication or tenant lookup,
 /// while borrowing the request immutably and preserving the body.
 ///
-/// Built-in implementations include [`Query`], [`Path`], and [`RawHeaders`].
+/// Built-in implementations include [`Query`], [`Path`], [`RawHeaders`], and [`Dependency`].
 /// Read borrowed cookies through [`super::RequestExt::cookies`].
 /// JSON extraction consumes the body instead.
 /// See [`FromRequestBody`] for body-consuming extractors.
 ///
-/// # Implementing
+/// `S` is an explicitly supplied context, defaulting to `()`. It may be a narrow
+/// service, an unsized interface, or a root satisfying [`Provide`] bounds. The
+/// context is borrowed for `'s`, independently of the request's `'r` lifetime.
+/// Implementations can return values borrowing either input and can await I/O.
+/// Stateless implementations can be generic over any `S` and ignore it. No
+/// `Clone`, `Send`, `Sync`, or `'static` bounds are required by this contract.
 ///
-/// ```text
-/// use kavi::http::extract::FromRequestHead;
-///
-/// struct MyExtractor;
-///
-/// impl FromRequestHead for MyExtractor {
-///     type Error = std::convert::Infallible;
-///
-///     async fn from_head(request: &kavi::http::Request) -> Result<Self, Self::Error> {
-///         // Read request metadata without consuming its body.
-///         Ok(MyExtractor)
-///     }
-/// }
-/// ```
+/// [`super::RequestExt::extract_head`] supplies unit context;
+/// [`super::RequestExt::extract_head_with`] supplies the caller's explicit context.
+/// Context values are never installed in request extensions by extraction.
 #[allow(async_fn_in_trait)]
-pub trait FromRequestHead: Sized {
+pub trait FromRequestHead<'r, 's, S: ?Sized = ()>: Sized {
     /// The error type returned when extraction fails.
     type Error;
 
     /// Extracts the value while borrowing the request immutably. The body is preserved.
-    async fn from_head(request: &Request) -> Result<Self, Self::Error>;
+    async fn from_head(request: &'r Request, context: &'s S) -> Result<Self, Self::Error>;
 }
 
 /// Extracts typed data from the request body.
@@ -298,25 +333,16 @@ pub trait FromRequestHead: Sized {
 ///
 /// Built-in implementations include [`Json`], [`Form`], [`Bytes`], [`Text`], and [`super::multipart::Multipart`].
 ///
-/// # Implementing
+/// `S` and the independent request and context lifetimes follow [`FromRequestHead`].
+/// Outputs may borrow request metadata or context; data read from the separately
+/// owned body must remain owned by the output. Extraction does not lend buffers
+/// from a collected body. Implementations can await service access and body I/O
+/// without `Clone`, `Send`, `Sync`, or `'static` bounds.
 ///
-/// ```text
-/// use kavi::http::{Body, extract::FromRequestBody};
-///
-/// struct MyExtractor;
-///
-/// impl FromRequestBody for MyExtractor {
-///     type Error = kavi::http::body::CollectError<kavi::http::body::Error>;
-///
-///     async fn from_body(request: &kavi::http::Request, body: Body) -> Result<Self, Self::Error> {
-///         let collected = body.collect(1024 * 1024).await?;
-///         // ... process collected.bytes()
-///         Ok(MyExtractor)
-///     }
-/// }
-/// ```
+/// [`super::RequestExt::extract_body`] supplies unit context;
+/// [`super::RequestExt::extract_body_with`] supplies the caller's explicit context.
 #[allow(async_fn_in_trait)]
-pub trait FromRequestBody: Sized {
+pub trait FromRequestBody<'r, 's, S: ?Sized = ()>: Sized {
     /// The error type returned when extraction fails.
     type Error;
 
@@ -325,7 +351,7 @@ pub trait FromRequestBody: Sized {
     /// The separately owned body is consumed by this call.
     /// The borrowed request retains its head and extensions throughout extraction.
     /// Trailers are available via the [`vakya::body::Collected`] result.
-    async fn from_body(request: &Request, body: Body) -> Result<Self, Self::Error>;
+    async fn from_body(request: &'r Request, body: Body, context: &'s S) -> Result<Self, Self::Error>;
 }
 
 /// Errors produced when extracting a typed path parameter.

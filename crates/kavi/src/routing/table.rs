@@ -34,9 +34,10 @@ pub(super) struct Endpoint {
 /// methods match, dispatch returns a fallible 405 with a sorted `Allow` header,
 /// including implicit HEAD. OPTIONS requires explicit registration. Table
 /// middleware wraps every outcome; group and route middleware wrap selected routes.
+/// Merged-router middleware wraps its imported endpoints and imported fallback.
 /// Middleware is registered on [`super::Router`] before building the table. Each
-/// endpoint has one complete compiled chain, with a table-only chain for errors
-/// and the root fallback.
+/// endpoint and fallback has one complete compiled chain. General routing errors
+/// use the outer table's middleware chain.
 #[must_use]
 pub struct RoutingTable {
     pub(super) paths: HashMap<Method, Matcher>,
@@ -45,7 +46,7 @@ pub struct RoutingTable {
     pub(super) endpoints: Vec<Endpoint>,
     pub(super) middleware: Vec<Box<dyn ErasedMiddleware>>,
     pub(super) table_chain: Vec<usize>,
-    pub(super) fallback: Option<Box<dyn ErasedController>>,
+    pub(super) fallback: Option<Endpoint>,
 }
 
 impl RoutingTable {
@@ -164,7 +165,7 @@ impl RoutingTable {
         }
 
         match &self.fallback {
-            Some(controller) => Ok((&self.table_chain, &**controller)),
+            Some(endpoint) => Ok((&endpoint.chain, &*endpoint.controller)),
             None => Err(Error::status(StatusCode::NOT_FOUND)),
         }
     }

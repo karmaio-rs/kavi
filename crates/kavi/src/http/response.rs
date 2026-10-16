@@ -20,9 +20,15 @@ use super::cookies::ResponseCookies;
 /// Import this trait alongside [`Response`] to access the methods
 pub trait ResponseExt {
     /// Borrows the outgoing store, if one has been initialized.
+    ///
+    /// Response construction does not serialize this store into headers. Cookie
+    /// middleware must process it with the request's effective processor and emit
+    /// each outgoing cookie once.
     fn cookies(&self) -> Option<&ResponseCookies<'static>>;
 
     /// Borrows the outgoing store, initializing an empty one when necessary.
+    ///
+    /// The store belongs to this response and must not be shared across requests.
     fn cookies_mut(&mut self) -> &mut ResponseCookies<'static>;
 }
 

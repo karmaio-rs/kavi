@@ -1,24 +1,33 @@
-use std::{collections::HashMap, panic::Location};
+use std::{collections::HashMap, panic::Location, rc::Rc};
 
 use super::{
     BuildError, Group, Pattern, Route, RouteInfo, RoutingTable, TypedPath,
     matcher::{Candidate, InsertError, Matcher, MatcherBuilder},
-    route::DeclarationPattern,
+    route::{DeclarationPattern, RouteDeclaration},
     table::Endpoint,
 };
 use crate::{
-    dispatch::{Controller, ErasedController, ErasedMiddleware, Middleware},
+    dispatch::{
+        Controller, ControllerFactory, ErasedMiddleware, Middleware, MiddlewareFactory, defer_controller,
+        defer_middleware,
+    },
     http::Method,
 };
 
 /// Collects routes, groups, and a root fallback for validation at startup.
 ///
-/// Method registration returns a borrowed [`Route`] for naming and middleware.
-/// Groups inherit path and name prefixes and middleware; merges move ownership.
-/// [`Self::build`] consumes the declarations into an immutable [`RoutingTable`].
+/// Method registration returns a [`Route`] handle for naming and middleware.
+/// Groups inherit path and name prefixes and middleware. Merged routers retain
+/// their middleware scopes. [`Self::build_with_dependencies`] binds declarations
+/// to one application-owned context and compiles an immutable [`RoutingTable`].
 /// Router middleware covers its entire scope, regardless of when routes are
 /// registered. At the root it also wraps fallbacks, misses, and routing errors.
 /// Controllers and middleware need not be `Send` or `Sync`.
+/// `S` is the dependency root required by the declarations, checked at registration.
+/// The router does not own that root until compilation. Injection borrows services
+/// or explicitly clones annotated owned parameters, without placing them in the
+/// HTTP request. Construct runtime-bound services on their worker and retain the
+/// context for application lifecycle management.
 ///
 /// Patterns support: `/users/{id}`, `/{file}.json`, and
 /// `/files/{*rest}`. Literal braces are escaped as `{{` and `}}`. Recognition
@@ -27,35 +36,71 @@ use crate::{
 /// candidates of the same shape; equal candidates use registration order.
 /// Unicode literals are encoded in both declaration styles. [`TypedPath`] supports
 /// typed registration without changing the controller's request contract.
-#[derive(Default)]
 #[must_use]
-pub struct Router {
-    declarations: Vec<Declaration>,
-    middleware: Vec<Box<dyn ErasedMiddleware>>,
+pub struct Router<S = ()> {
+    scope: Scope<S>,
 }
 
-enum Declaration {
-    Route(Route),
-    Group(Group, Router, &'static Location<'static>),
-    Fallback(Box<dyn ErasedController>, &'static Location<'static>),
+struct Scope<S> {
+    declarations: Vec<Declaration<S>>,
+    middleware: Vec<MiddlewareFactory<S>>,
+}
+
+impl<S> Default for Scope<S> {
+    #[inline]
+    fn default() -> Self {
+        Self {
+            declarations: Vec::new(),
+            middleware: Vec::new(),
+        }
+    }
+}
+
+enum Declaration<S> {
+    Route(RouteDeclaration<S>),
+    Group(Group, Scope<S>, &'static Location<'static>),
+    Merge(Scope<S>),
+    Fallback(ControllerFactory<S>, &'static Location<'static>),
+}
+
+impl<S: 'static> Default for Router<S> {
+    #[inline]
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Router {
-    /// Creates an empty router.
+    /// Compiles declarations that require no application dependencies.
+    ///
+    /// # Errors
+    /// Returns [`BuildError`] for invalid or conflicting declarations.
+    #[inline]
+    pub fn build(self) -> Result<RoutingTable, BuildError> {
+        self.build_with_dependencies(Rc::new(()))
+    }
+}
+
+impl<S: 'static> Router<S> {
+    /// Creates empty route declarations requiring application dependencies of type `S`.
     #[inline]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            scope: Scope::default(),
+        }
     }
 
     /// Adds middleware to this router's whole scope in registration order.
     ///
     /// At the root, middleware wraps every outcome, including the fallback and
-    /// routing errors, before group and route middleware. Within a group closure,
-    /// it wraps selected routes after the group's configured middleware and before
-    /// nested group and route middleware. It applies to routes registered before
-    /// or after this call. All chains are compiled by [`Self::build`].
-    pub fn middleware<M: Middleware>(&mut self, middleware: M) -> &mut Self {
-        self.middleware.push(Box::new(middleware));
+    /// routing errors, before group, merged-router, and route middleware. Within a
+    /// group closure, it wraps selected routes before nested scopes and route
+    /// middleware. A merged router's middleware covers its imported endpoints,
+    /// including its fallback, without wrapping siblings or general routing errors.
+    /// It applies to routes registered before or after this call. All chains are
+    /// compiled by [`Self::build_with_dependencies`].
+    pub fn middleware<M: Middleware<S>>(&mut self, middleware: M) -> &mut Self {
+        self.scope.middleware.push(defer_middleware(middleware));
         self
     }
 
@@ -63,7 +108,7 @@ impl Router {
     ///
     /// Extension methods are supported. Invalid declarations fail at build time.
     #[track_caller]
-    pub fn on<C: Controller>(&mut self, method: Method, path: impl Into<String>, controller: C) -> &mut Route {
+    pub fn on<C: Controller<S>>(&mut self, method: Method, path: impl Into<String>, controller: C) -> Route<'_, S> {
         self.methods([method], path, controller)
     }
 
@@ -71,12 +116,12 @@ impl Router {
     ///
     /// An empty list, repeated methods, or duplicate registrations fail at build time.
     #[track_caller]
-    pub fn methods<C: Controller>(
+    pub fn methods<C: Controller<S>>(
         &mut self,
         methods: impl IntoIterator<Item = Method>,
         path: impl Into<String>,
         controller: C,
-    ) -> &mut Route {
+    ) -> Route<'_, S> {
         self.register(methods, DeclarationPattern::Text(path.into()), controller)
     }
 
@@ -85,21 +130,21 @@ impl Router {
         &mut self,
         methods: impl IntoIterator<Item = Method>,
         pattern: DeclarationPattern,
-        controller: impl Controller,
-    ) -> &mut Route {
-        self.declarations.push(Declaration::Route(Route {
+        controller: impl Controller<S>,
+    ) -> Route<'_, S> {
+        self.scope.declarations.push(Declaration::Route(RouteDeclaration {
             pattern,
             constraints: Vec::new(),
             methods: methods.into_iter().collect(),
-            controller: Box::new(controller),
+            controller: defer_controller(controller),
             middleware: Vec::new(),
             name: None,
             location: Location::caller(),
         }));
-        let Some(Declaration::Route(route)) = self.declarations.last_mut() else {
+        let Some(Declaration::Route(declaration)) = self.scope.declarations.last_mut() else {
             unreachable!("the declaration just appended is a route");
         };
-        route
+        Route { declaration }
     }
 
     /// Registers an exact HTTP method using a typed path's declared pattern.
@@ -107,7 +152,7 @@ impl Router {
     /// The controller still takes one owned request. Extract the path value
     /// inside the controller through [`crate::http::RequestExt::extract_head`].
     #[track_caller]
-    pub fn typed_on<P: TypedPath>(&mut self, method: Method, controller: impl Controller) -> &mut Route {
+    pub fn typed_on<P: TypedPath>(&mut self, method: Method, controller: impl Controller<S>) -> Route<'_, S> {
         self.typed_methods::<P>([method], controller)
     }
 
@@ -119,8 +164,8 @@ impl Router {
     pub fn typed_methods<P: TypedPath>(
         &mut self,
         methods: impl IntoIterator<Item = Method>,
-        controller: impl Controller,
-    ) -> &mut Route {
+        controller: impl Controller<S>,
+    ) -> Route<'_, S> {
         self.register(methods, DeclarationPattern::Typed(P::pattern().clone()), controller)
     }
 
@@ -129,24 +174,28 @@ impl Router {
     /// The closure runs immediately. Group configuration applies to every route
     /// within it. A child `/` denotes the group base without a trailing slash.
     /// A single slash joins each boundary; other slashes remain significant.
+    /// Register middleware on the child router inside the closure.
     #[track_caller]
-    pub fn group(&mut self, group: Group, configure: impl FnOnce(&mut Router)) -> &mut Self {
+    pub fn group(&mut self, group: Group, configure: impl FnOnce(&mut Self)) -> &mut Self {
         let mut router = Self::new();
         configure(&mut router);
-        self.declarations
-            .push(Declaration::Group(group, router, Location::caller()));
+        self.scope
+            .declarations
+            .push(Declaration::Group(group, router.scope, Location::caller()));
         self
     }
 
-    /// Moves another router's declarations and middleware into the current scope.
+    /// Imports another router's declarations while preserving its middleware scope.
     ///
-    /// Declaration order is preserved. Middleware is appended in registration
-    /// order and applies to the whole receiving scope, including existing routes.
-    /// Group inheritance also applies to merged declarations. Merging a fallback
-    /// into a group or registering multiple root fallbacks fails at build time.
+    /// Declaration order is preserved. Parent prefixes, constraints, and middleware
+    /// apply to imported routes. Imported middleware wraps only those endpoints,
+    /// including an imported root fallback, and runs after parent middleware.
+    /// Both routers require the same dependency type and bind to the same owner
+    /// when built. Merging a fallback into a group or registering multiple root
+    /// fallbacks fails at build time. General routing errors use only the outer
+    /// router's middleware.
     pub fn merge(&mut self, other: Self) -> &mut Self {
-        self.declarations.extend(other.declarations);
-        self.middleware.extend(other.middleware);
+        self.scope.declarations.push(Declaration::Merge(other.scope));
         self
     }
 
@@ -156,13 +205,23 @@ impl Router {
     /// It does not handle unsupported methods, malformed captures, or controller errors.
     /// Multiple fallbacks or a fallback within a group fail at build time.
     #[track_caller]
-    pub fn fallback<C: Controller>(&mut self, controller: C) -> &mut Self {
-        self.declarations
-            .push(Declaration::Fallback(Box::new(controller), Location::caller()));
+    pub fn fallback<C: Controller<S>>(&mut self, controller: C) -> &mut Self {
+        self.scope
+            .declarations
+            .push(Declaration::Fallback(defer_controller(controller), Location::caller()));
         self
     }
 
-    /// Validates declarations and compiles method indexes, dispatch chains, and route metadata.
+    /// Binds one shared application context and compiles validated routing declarations.
+    ///
+    /// The context need not implement `Clone`, `Send`, or `Sync`. Every controller
+    /// and middleware projects from the same owner, retained by bound endpoints.
+    /// This includes all groups, merged scopes, route middleware, and the fallback.
+    /// Borrowed bindings do not clone their targets; owned macro bindings clone
+    /// only when explicitly annotated. Keep an application-owned `Rc` clone for
+    /// jobs, tasks, and asynchronous shutdown.
+    /// The resulting table erases the dependency type and does not initialize or
+    /// shut down services.
     ///
     /// GET supplies implicit HEAD, with explicit HEAD preferred for the same
     /// shape. Names are globally unique, including on identical paths.
@@ -173,15 +232,16 @@ impl Router {
     /// Returns [`BuildError`] for invalid or conflicting declarations, with their
     /// registration locations. A failed build consumes all declarations and does
     /// not expose a partially compiled table.
-    pub fn build(self) -> Result<RoutingTable, BuildError> {
+    pub fn build_with_dependencies(self, dependencies: Rc<S>) -> Result<RoutingTable, BuildError> {
         let mut compiler = Compiler::default();
-        let table_chain = compiler.inherit(&[], self.middleware);
+        let table_chain = compiler.inherit(&[], self.scope.middleware, &dependencies);
         compiler.compile(
-            self.declarations,
+            self.scope.declarations,
             &Pattern::parse("/").expect("static root pattern"),
             "",
             &table_chain,
             true,
+            &dependencies,
         )?;
 
         let paths = compile_methods(&compiler.routes)?;
@@ -193,23 +253,23 @@ impl Router {
             endpoints: compiler.endpoints,
             middleware: compiler.middleware,
             table_chain,
-            fallback: compiler.fallback.map(|(controller, _)| controller),
+            fallback: compiler.fallback.map(|(endpoint, _)| endpoint),
         })
     }
 }
 
 macro_rules! methods {
     ($($name:ident, $typed:ident => $method:ident),+ $(,)?) => {$(
-        impl Router {
+        impl<S: 'static> Router<S> {
             #[doc = concat!("Registers a controller for `", stringify!($method), "` requests.")]
             #[track_caller]
-            pub fn $name<C: Controller>(&mut self, path: impl Into<String>, controller: C) -> &mut Route {
+            pub fn $name<C: Controller<S>>(&mut self, path: impl Into<String>, controller: C) -> Route<'_, S> {
                 self.on(Method::$method, path, controller)
             }
 
             #[doc = concat!("Registers a controller for `", stringify!($method), "` using a typed path's pattern.")]
             #[track_caller]
-            pub fn $typed<P: TypedPath>(&mut self, controller: impl Controller) -> &mut Route {
+            pub fn $typed<P: TypedPath>(&mut self, controller: impl Controller<S>) -> Route<'_, S> {
                 self.typed_on::<P>(Method::$method, controller)
             }
         }
@@ -234,17 +294,18 @@ struct Compiler {
     endpoints: Vec<Endpoint>,
     names: HashMap<String, usize>,
     middleware: Vec<Box<dyn ErasedMiddleware>>,
-    fallback: Option<(Box<dyn ErasedController>, &'static Location<'static>)>,
+    fallback: Option<(Endpoint, &'static Location<'static>)>,
 }
 
 impl Compiler {
-    fn compile(
+    fn compile<S: 'static>(
         &mut self,
-        declarations: Vec<Declaration>,
+        declarations: Vec<Declaration<S>>,
         prefix: &Pattern,
         name_prefix: &str,
         inherited: &[usize],
         root: bool,
+        dependencies: &Rc<S>,
     ) -> Result<(), BuildError> {
         for declaration in declarations {
             match declaration {
@@ -309,7 +370,7 @@ impl Compiler {
                         self.names.insert(name.clone(), self.routes.len());
                     }
 
-                    let chain = self.inherit(inherited, route.middleware);
+                    let chain = self.inherit(inherited, route.middleware, dependencies);
 
                     self.routes.push(RouteInfo {
                         pattern,
@@ -319,11 +380,11 @@ impl Compiler {
                     });
 
                     self.endpoints.push(Endpoint {
-                        controller: route.controller,
+                        controller: (route.controller)(Rc::clone(dependencies)),
                         chain,
                     });
                 }
-                Declaration::Group(mut group, router, location) => {
+                Declaration::Group(group, scope, location) => {
                     let mut group_prefix = Pattern::parse(&group.prefix).map_err(|source| BuildError::Pattern {
                         path: group.prefix,
                         location,
@@ -350,9 +411,19 @@ impl Compiler {
                             })?;
                     }
                     let name_prefix = format!("{name_prefix}{}", group.name_prefix);
-                    group.middleware.extend(router.middleware);
-                    let chain = self.inherit(inherited, group.middleware);
-                    self.compile(router.declarations, &group_prefix, &name_prefix, &chain, false)?;
+                    let chain = self.inherit(inherited, scope.middleware, dependencies);
+                    self.compile(
+                        scope.declarations,
+                        &group_prefix,
+                        &name_prefix,
+                        &chain,
+                        false,
+                        dependencies,
+                    )?;
+                }
+                Declaration::Merge(scope) => {
+                    let chain = self.inherit(inherited, scope.middleware, dependencies);
+                    self.compile(scope.declarations, prefix, name_prefix, &chain, root, dependencies)?;
                 }
                 Declaration::Fallback(controller, location) => {
                     if !root {
@@ -364,18 +435,30 @@ impl Compiler {
                             second: location,
                         });
                     }
-                    self.fallback = Some((controller, location));
+                    self.fallback = Some((
+                        Endpoint {
+                            controller: controller(Rc::clone(dependencies)),
+                            chain: inherited.to_vec(),
+                        },
+                        location,
+                    ));
                 }
             }
         }
         Ok(())
     }
 
-    fn inherit(&mut self, inherited: &[usize], middleware: Vec<Box<dyn ErasedMiddleware>>) -> Vec<usize> {
+    fn inherit<S: 'static>(
+        &mut self,
+        inherited: &[usize],
+        middleware: Vec<MiddlewareFactory<S>>,
+        dependencies: &Rc<S>,
+    ) -> Vec<usize> {
         let mut chain = Vec::with_capacity(inherited.len() + middleware.len());
         chain.extend_from_slice(inherited);
         chain.extend(self.middleware.len()..self.middleware.len() + middleware.len());
-        self.middleware.extend(middleware);
+        self.middleware
+            .extend(middleware.into_iter().map(|bind| bind(Rc::clone(dependencies))));
 
         chain
     }

@@ -8,17 +8,15 @@
 //!
 //! [`ProcessorConfig::default`] enables percent-encoding and decoding. Signing
 //! and encryption are opt-in through [`config::CryptoRule`]. Use the same
-//! application-configured [`Processor`] for incoming and outgoing cookies.
+//! configured [`Processor`] for incoming and outgoing cookies.
 //!
 //! [`super::RequestExt::cookies`] uses a [`Processor`] from request extensions,
-//! or a shared default processor when
-//! none is installed. The application boundary can install its configured
-//! processor with `request.extensions_mut().insert(processor.clone())`.
-//! Controllers do not need to pass configuration when reading cookies.
-//!
-//! ```text
-//! let cookies = request.cookies()?;
-//! ```
+//! or a shared default when none is installed. Cookie middleware can own the
+//! configured processor, install it in each request's extensions, and use the
+//! same policy to process outgoing [`ResponseCookies`]. Controllers read cookies
+//! through the request without receiving configuration as an application dependency.
+//! Applications requiring signing or encryption must install their processor;
+//! the default only performs percent-encoding and decoding.
 
 pub use biscotti::{
     Expiration, Key, Processor, ProcessorConfig, RemovalCookie, RequestCookie, RequestCookies, ResponseCookie,
@@ -29,7 +27,7 @@ use super::Request;
 use http::{header::COOKIE, header::ToStrError};
 use std::sync::OnceLock;
 
-/// Resolves the request's processor without rebuilding the default per request.
+/// Resolves the request's effective cookie policy without rebuilding the default.
 pub(crate) fn processor(request: &Request) -> &Processor {
     static DEFAULT_PROCESSOR: OnceLock<Processor> = OnceLock::new();
     request
@@ -62,8 +60,19 @@ pub enum CookieError {
 /// [`CookieError::Parse`] for malformed syntax, invalid decoded UTF-8, or failed
 /// cryptographic verification. No partially parsed collection is returned.
 pub fn from_headers(request: &Request) -> Result<RequestCookies<'_>, CookieError> {
+    from_headers_with(request, processor(request))
+}
+
+/// Parses every Cookie header using an explicitly supplied processor.
+///
+/// The collection borrows the request's headers, not the processor. Signing and
+/// encryption use the supplied configuration. This low-level override does not
+/// change the processor in request extensions or the outgoing cookie policy.
+///
+/// # Errors
+/// Returns [`CookieError`] for unreadable headers or failed cookie processing.
+pub fn from_headers_with<'a>(request: &'a Request, processor: &Processor) -> Result<RequestCookies<'a>, CookieError> {
     let mut cookies = RequestCookies::new();
-    let processor = processor(request);
     for value in request.headers().get_all(COOKIE) {
         cookies.extend_from_header(value.to_str()?, processor)?;
     }

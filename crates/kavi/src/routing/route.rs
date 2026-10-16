@@ -2,7 +2,7 @@ use std::panic::Location;
 
 use super::Pattern;
 use crate::{
-    dispatch::{ErasedController, ErasedMiddleware, Middleware},
+    dispatch::{ControllerFactory, Middleware, MiddlewareFactory, defer_middleware},
     http::Method,
 };
 
@@ -11,29 +11,35 @@ pub(super) enum DeclarationPattern {
     Typed(Pattern),
 }
 
-/// A registered route, borrowed from its router for further configuration.
+/// A route configuration handle borrowing its router's typed declaration.
 ///
 /// One controller serves every explicitly registered method. Middleware applies
 /// to the whole declaration, including implicit HEAD for GET. Neither the
 /// controller nor middleware is cloned or required to be `Send` or `Sync`.
-pub struct Route {
+/// Configuration methods mutate the registered declaration and support chaining.
+/// Dropping the handle leaves its declaration registered in the router.
+pub struct Route<'a, S = ()> {
+    pub(super) declaration: &'a mut RouteDeclaration<S>,
+}
+
+pub(super) struct RouteDeclaration<S> {
     pub(super) pattern: DeclarationPattern,
     pub(super) constraints: Vec<(String, String)>,
     pub(super) methods: Vec<Method>,
-    pub(super) controller: Box<dyn ErasedController>,
-    pub(super) middleware: Vec<Box<dyn ErasedMiddleware>>,
+    pub(super) controller: ControllerFactory<S>,
+    pub(super) middleware: Vec<MiddlewareFactory<S>>,
     pub(super) name: Option<String>,
     pub(super) location: &'static Location<'static>,
 }
 
-impl Route {
+impl<S: 'static> Route<'_, S> {
     /// Assigns a name, qualified by the containing groups' name prefixes.
     ///
     /// The final name must be nonempty and unique across all route declarations.
     /// Names support generation through the compiled routing table.
     /// Calling this again replaces the previously assigned name.
     pub fn name(&mut self, name: impl Into<String>) -> &mut Self {
-        self.name = Some(name.into());
+        self.declaration.name = Some(name.into());
         self
     }
 
@@ -41,7 +47,7 @@ impl Route {
     ///
     /// Unknown captures and invalid expressions fail in [`super::Router::build`].
     pub fn constraint(&mut self, name: impl Into<String>, regex: impl Into<String>) -> &mut Self {
-        set_constraint(&mut self.constraints, name.into(), regex.into());
+        set_constraint(&mut self.declaration.constraints, name.into(), regex.into());
         self
     }
 
@@ -49,8 +55,8 @@ impl Route {
     ///
     /// It runs after table and group middleware, only when this route is selected
     /// and its captures have been decoded successfully.
-    pub fn middleware<M: Middleware>(&mut self, middleware: M) -> &mut Self {
-        self.middleware.push(Box::new(middleware));
+    pub fn middleware<M: Middleware<S>>(&mut self, middleware: M) -> &mut Self {
+        self.declaration.middleware.push(defer_middleware(middleware));
         self
     }
 }

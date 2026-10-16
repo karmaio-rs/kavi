@@ -23,7 +23,7 @@ proc-macro = true
 [dependencies]
 proc-macro2 = "1"
 quote = "1"
-syn = "2"
+syn = { version = "2", features = ["full", "visit"] }
 percent-encoding = "2.3.2"
 regex = "1"
 regex-syntax = "0.8"

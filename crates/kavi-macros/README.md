@@ -2,4 +2,4 @@
 
 > Status: work in progress. Not yet ready for production use
 
-Provides Kavi's `TypedPath` derive for typed route registration, encoded URI generation, and request-head extraction. Import it through `kavi::routing`.
+Provides `Dependencies`, `controller`, and `middleware` for typed application dependency binding, plus `TypedPath` for routes and URI generation. Import the handler macros through `kavi` or `kavi::dispatch`, and `TypedPath` through `kavi::routing`; the API contracts are documented in rustdoc.

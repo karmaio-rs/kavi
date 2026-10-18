@@ -17,6 +17,11 @@
 //! Body extractors
 //! may borrow metadata or context, but must own data from their consumed body.
 //!
+//! Buffered body extractors accept [`BufferedBodyLimit`] as their explicit context;
+//! streaming multipart extraction accepts [`super::multipart::MultipartLimits`].
+//! Unit context uses fixed defaults. Application services and configuration stay
+//! outside the request; these extractors do not inspect extensions for limits.
+//!
 //! Streaming form uploads use [`super::multipart::Multipart`].
 
 use serde::de::DeserializeOwned;
@@ -25,13 +30,15 @@ use crate::dispatch::Provide;
 
 use super::{
     Body, HeaderMap, Request, RoutingInfo,
-    body::{CollectError, DEFAULT_BODY_LIMIT, Error as BodySourceError},
+    body::{BufferedBodyLimit, CollectError, Error as BodySourceError},
 };
 
 /// Extracts and deserializes a JSON request body.
 ///
 /// Checks that the `Content-Type` header is `application/json` before consuming the body.
 /// The body is collected and deserialized into `T`.
+/// Pass [`BufferedBodyLimit`] to explicit-context extraction to configure the
+/// collection budget; unit context uses 2 MiB.
 /// Use [`crate::http::response::json`] to build a JSON response.
 ///
 /// # Errors
@@ -55,10 +62,19 @@ pub enum JsonError {
     Deserialize(#[from] serde_json::Error),
 }
 
-impl<'r, 's, T: DeserializeOwned, S: ?Sized> FromRequestBody<'r, 's, S> for Json<T> {
+impl<'r, 's, T: DeserializeOwned> FromRequestBody<'r, 's> for Json<T> {
     type Error = JsonError;
 
-    async fn from_body(request: &'r Request, body: Body, _: &'s S) -> Result<Self, Self::Error> {
+    #[inline]
+    async fn from_body(request: &'r Request, body: Body, _: &'s ()) -> Result<Self, Self::Error> {
+        Self::from_body(request, body, &BufferedBodyLimit::default()).await
+    }
+}
+
+impl<'r, 's, T: DeserializeOwned> FromRequestBody<'r, 's, BufferedBodyLimit> for Json<T> {
+    type Error = JsonError;
+
+    async fn from_body(request: &'r Request, body: Body, limit: &'s BufferedBodyLimit) -> Result<Self, Self::Error> {
         // Check content type
         let content_type = request
             .headers()
@@ -72,9 +88,8 @@ impl<'r, 's, T: DeserializeOwned, S: ?Sized> FromRequestBody<'r, 's, S> for Json
             return Err(JsonError::WrongContentType);
         }
 
-        // Collect body with the default limit
-        // TODO: Make this dynamic from config later
-        let collected = body.collect(DEFAULT_BODY_LIMIT).await?;
+        // Collection budgets remain subject to independently enforced stream ceilings.
+        let collected = body.collect(limit.0).await?;
         let value = serde_json::from_slice(collected.bytes())?;
         Ok(Json(value))
     }
@@ -83,6 +98,8 @@ impl<'r, 's, T: DeserializeOwned, S: ?Sized> FromRequestBody<'r, 's, S> for Json
 /// Extracts and deserializes a form-urlencoded request body.
 ///
 /// Checks that the `Content-Type` header is `application/x-www-form-urlencoded` before consuming the body.
+/// Pass [`BufferedBodyLimit`] to explicit-context extraction to configure the
+/// collection budget; unit context uses 2 MiB.
 ///
 /// # Errors
 ///
@@ -105,10 +122,19 @@ pub enum FormError {
     Deserialize(#[from] serde_qs::Error),
 }
 
-impl<'r, 's, T: DeserializeOwned, S: ?Sized> FromRequestBody<'r, 's, S> for Form<T> {
+impl<'r, 's, T: DeserializeOwned> FromRequestBody<'r, 's> for Form<T> {
     type Error = FormError;
 
-    async fn from_body(request: &'r Request, body: Body, _: &'s S) -> Result<Self, Self::Error> {
+    #[inline]
+    async fn from_body(request: &'r Request, body: Body, _: &'s ()) -> Result<Self, Self::Error> {
+        Self::from_body(request, body, &BufferedBodyLimit::default()).await
+    }
+}
+
+impl<'r, 's, T: DeserializeOwned> FromRequestBody<'r, 's, BufferedBodyLimit> for Form<T> {
+    type Error = FormError;
+
+    async fn from_body(request: &'r Request, body: Body, limit: &'s BufferedBodyLimit) -> Result<Self, Self::Error> {
         let content_type = request
             .headers()
             .get(http::header::CONTENT_TYPE)
@@ -122,7 +148,7 @@ impl<'r, 's, T: DeserializeOwned, S: ?Sized> FromRequestBody<'r, 's, S> for Form
             return Err(FormError::WrongContentType);
         }
 
-        let collected = body.collect(DEFAULT_BODY_LIMIT).await?;
+        let collected = body.collect(limit.0).await?;
         let value = serde_qs::from_bytes(collected.bytes())?;
         Ok(Form(value))
     }
@@ -197,6 +223,8 @@ impl<'r, 's, T: DeserializeOwned, S: ?Sized> FromRequestHead<'r, 's, S> for Quer
 ///
 /// This consumes the remaining body. Subsequent body extraction sees an empty
 /// body unless application code explicitly replaces it.
+/// Pass [`BufferedBodyLimit`] to explicit-context extraction to configure the
+/// collection budget; unit context uses 2 MiB.
 ///
 /// # Errors
 ///
@@ -211,12 +239,21 @@ pub enum BodyError {
     Collect(#[from] CollectError<BodySourceError>),
 }
 
-impl<'r, 's, S: ?Sized> FromRequestBody<'r, 's, S> for Bytes {
+impl<'r, 's> FromRequestBody<'r, 's> for Bytes {
     type Error = BodyError;
 
-    async fn from_body(_request: &'r Request, body: Body, _: &'s S) -> Result<Self, Self::Error> {
-        let collected = body.collect(DEFAULT_BODY_LIMIT).await?;
-        Ok(Bytes(collected.bytes().clone()))
+    #[inline]
+    async fn from_body(request: &'r Request, body: Body, _: &'s ()) -> Result<Self, Self::Error> {
+        Self::from_body(request, body, &BufferedBodyLimit::default()).await
+    }
+}
+
+impl<'r, 's> FromRequestBody<'r, 's, BufferedBodyLimit> for Bytes {
+    type Error = BodyError;
+
+    async fn from_body(_: &'r Request, body: Body, limit: &'s BufferedBodyLimit) -> Result<Self, Self::Error> {
+        let collected = body.collect(limit.0).await?;
+        Ok(Bytes(collected.into_parts().0))
     }
 }
 
@@ -224,6 +261,8 @@ impl<'r, 's, S: ?Sized> FromRequestBody<'r, 's, S> for Bytes {
 ///
 /// This consumes the remaining body. Subsequent body extraction sees an empty
 /// body unless application code explicitly replaces it.
+/// Pass [`BufferedBodyLimit`] to explicit-context extraction to configure the
+/// collection budget; unit context uses 2 MiB.
 ///
 /// # Errors
 ///
@@ -242,13 +281,23 @@ pub enum TextError {
     Utf8(#[from] std::str::Utf8Error),
 }
 
-impl<'r, 's, S: ?Sized> FromRequestBody<'r, 's, S> for Text {
+impl<'r, 's> FromRequestBody<'r, 's> for Text {
     type Error = TextError;
 
-    async fn from_body(_request: &'r Request, body: Body, _: &'s S) -> Result<Self, Self::Error> {
-        let collected = body.collect(DEFAULT_BODY_LIMIT).await?;
-        let s = std::str::from_utf8(collected.bytes())?;
-        Ok(Text(s.to_owned()))
+    #[inline]
+    async fn from_body(request: &'r Request, body: Body, _: &'s ()) -> Result<Self, Self::Error> {
+        Self::from_body(request, body, &BufferedBodyLimit::default()).await
+    }
+}
+
+impl<'r, 's> FromRequestBody<'r, 's, BufferedBodyLimit> for Text {
+    type Error = TextError;
+
+    async fn from_body(_: &'r Request, body: Body, limit: &'s BufferedBodyLimit) -> Result<Self, Self::Error> {
+        let collected = body.collect(limit.0).await?;
+        let bytes = collected.into_parts().0;
+        let text = String::from_utf8(Vec::from(bytes)).map_err(|error| error.utf8_error())?;
+        Ok(Text(text))
     }
 }
 
@@ -300,7 +349,7 @@ impl<'r, 's, T: ?Sized, S: Provide<T> + ?Sized> FromRequestHead<'r, 's, S> for D
 /// while borrowing the request immutably and preserving the body.
 ///
 /// Built-in implementations include [`Query`], [`Path`], [`RawHeaders`], and [`Dependency`].
-/// Read borrowed cookies through [`super::RequestExt::cookies`].
+/// With the `cookies` feature, read borrowed cookies through `RequestExt::cookies`.
 /// JSON extraction consumes the body instead.
 /// See [`FromRequestBody`] for body-consuming extractors.
 ///

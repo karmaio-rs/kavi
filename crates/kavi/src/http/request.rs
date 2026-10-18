@@ -8,15 +8,17 @@ use std::{
 use crate::routing::{Param, RouteParams};
 
 use super::{
-    MetadataError, Request, Uri,
-    cookies::{self, CookieError, RequestCookies},
+    Request, Uri,
     extract::{FromRequestBody, FromRequestHead, ParamError, QueryError},
     metadata::RequestMetadata,
 };
 
+#[cfg(feature = "cookies")]
+use super::cookies::{self, CookieError, RequestCookies};
+
 /// Transport-level connection metadata.
 ///
-/// Supplied from the accepted socket by [`super::from_vakya`] and retained in
+/// Supplied from the accepted socket by [`crate::foundation::server`] and retained in
 /// [`http::Extensions`]. Proxy metadata does not change these transport facts.
 /// Accessed via [`RequestExt`] methods. The required `scheme` field must reflect
 /// the actual transport rather than a request URI or forwarding header.
@@ -127,9 +129,8 @@ impl RoutingInfo {
 /// remain the request-local metadata store and retain their upstream insertion
 /// bounds. Worker-local resources can be acquired as extractor outputs; separate
 /// local request storage is deferred.
-/// The HTTP boundary captures origin metadata before rewriting. Synthetic
-/// requests can call [`Self::capture_metadata`] explicitly; routing alone does
-/// not initialize it. Effective metadata storage remains internal.
+/// [`crate::Application`] captures origin metadata before rewriting, including
+/// synthetic requests. Effective metadata storage remains internal.
 #[allow(async_fn_in_trait)]
 pub trait RequestExt {
     /// Returns the remote peer's socket address, if known.
@@ -159,18 +160,6 @@ pub trait RequestExt {
     /// Returns the captured HTTP(S) origin, if scheme and authority are both known.
     fn origin(&self) -> Option<Uri>;
 
-    /// Captures the original URI and initial origin once, before request rewriting.
-    ///
-    /// Existing metadata, including trusted proxy updates, is preserved.
-    /// This does not initialize application state or per-request controls.
-    /// [`super::from_vakya`] captures it at the transport boundary;
-    /// [`super::TrustedProxies`] middleware captures it when missing. Bare routing
-    /// leaves capture and validation to the caller or relevant middleware.
-    ///
-    /// # Errors
-    /// Returns [`MetadataError`] for ambiguous or malformed origin metadata.
-    fn capture_metadata(&mut self) -> Result<(), MetadataError>;
-
     /// Returns the matched route pattern after recognition.
     fn matched_route(&self) -> Option<&str>;
 
@@ -196,23 +185,29 @@ pub trait RequestExt {
     /// Returns [`QueryError`] when deserialization fails.
     fn query<T: DeserializeOwned>(&self) -> Result<T, QueryError>;
 
-    /// Parses incoming cookies using the request's configured or default processor.
+    /// Parses incoming cookies using the supplied application processor.
     ///
     /// The collection borrows the request headers where possible and preserves
-    /// duplicate names. Middleware can install a [`cookies::Processor`] in request
-    /// extensions to establish the effective cookie policy. Outgoing cookies are
-    /// held separately and must be processed with that same policy.
+    /// duplicate names. Cookie processing is application configuration: keep the
+    /// configured [`cookies::Processor`] in the dependency root and pass it here.
+    /// Outgoing cookies can be queued for CookieMiddleware or appended immediately
+    /// with ResponseExt::set_cookie using the same processor.
+    /// Available with the `cookies` feature.
     ///
     /// # Errors
     /// Returns [`CookieError`] when a header is unreadable or cookie parsing,
     /// decoding, or cryptographic processing fails.
-    fn cookies(&self) -> Result<RequestCookies<'_>, CookieError>;
+    #[cfg(feature = "cookies")]
+    fn cookies(&self, processor: &cookies::Processor) -> Result<RequestCookies<'_>, CookieError>;
 
     /// Runs an asynchronous metadata extractor.
     ///
     /// The request is borrowed immutably. Its head, extensions, and body remain
     /// in place through success, error, unwinding, and cancellation.
     /// Outputs may borrow request metadata. The context is a static unit value.
+    /// Built-in buffered extractors use a 2 MiB collection budget; Multipart uses
+    /// its default field limits. Use [`Self::extract_body_with`] for application
+    /// settings. Body-limit middleware enforces payload bytes independently.
     ///
     /// # Errors
     /// Returns the error produced by the extractor.
@@ -236,13 +231,16 @@ pub trait RequestExt {
         E: FromRequestHead<'r, 's, S>,
         S: ?Sized;
 
-    /// Runs a body extractor.
+    /// Runs a body extractor with its default configuration.
     ///
     /// When first polled, this replaces the body with an empty body and transfers
     /// the remaining body to the extractor. The head and extensions stay in place
     /// on success, error, unwinding, and cancellation. The consumed body is never
     /// replayed. Dropping the future before polling leaves the request intact.
     /// Outputs may borrow request metadata. The context is a static unit value.
+    /// Built-in buffered extractors use a 2 MiB collection budget; Multipart uses
+    /// its default field limits. Use [`Self::extract_body_with`] for application
+    /// settings. Body-limit middleware enforces payload bytes independently.
     ///
     /// # Errors
     /// Returns the error produced by the extractor.
@@ -250,10 +248,13 @@ pub trait RequestExt {
     where
         E: FromRequestBody<'r, 'static>;
 
-    /// Runs a body extractor with an explicit service or context.
+    /// Runs a body extractor with explicit configuration or a service context.
     ///
     /// Body ownership and cancellation follow [`Self::extract_body`]. The context
     /// stays outside the request and is borrowed independently of its metadata.
+    /// For built-in buffered extractors pass [`super::body::BufferedBodyLimit`];
+    /// for Multipart pass [`super::multipart::MultipartLimits`]. Custom extractors
+    /// choose their own context type, including application dependency roots.
     /// Outputs may borrow metadata or context and must own their body-derived data.
     /// Neither context nor future requires `Clone`, `Send`, `Sync`, or `'static`.
     ///
@@ -317,16 +318,6 @@ impl RequestExt for Request {
         self.extensions().get::<RequestMetadata>()?.origin()
     }
 
-    // TODO: Make this automatic when building the app server
-    #[inline]
-    fn capture_metadata(&mut self) -> Result<(), MetadataError> {
-        if self.extensions().get::<RequestMetadata>().is_none() {
-            let metadata = RequestMetadata::capture(self)?;
-            self.extensions_mut().insert(metadata);
-        }
-        Ok(())
-    }
-
     #[inline]
     fn matched_route(&self) -> Option<&str> {
         self.extensions().get::<RoutingInfo>().map(RoutingInfo::matched_path)
@@ -358,9 +349,10 @@ impl RequestExt for Request {
         serde_qs::from_str(self.uri().query().unwrap_or("")).map_err(QueryError::from)
     }
 
+    #[cfg(feature = "cookies")]
     #[inline]
-    fn cookies(&self) -> Result<RequestCookies<'_>, CookieError> {
-        cookies::from_headers(self)
+    fn cookies(&self, processor: &cookies::Processor) -> Result<RequestCookies<'_>, CookieError> {
+        cookies::from_headers(self, processor)
     }
 
     #[inline]

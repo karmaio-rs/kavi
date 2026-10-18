@@ -8,7 +8,6 @@ use super::constants;
 #[derive(Debug)]
 #[must_use]
 pub struct SizeLimit {
-    pub(crate) whole_stream: u64,
     pub(crate) preamble: u64,
     pub(crate) per_field: u64,
     pub(crate) headers: u64,
@@ -18,16 +17,10 @@ pub struct SizeLimit {
 impl SizeLimit {
     /// Creates the default size limits.
     ///
-    /// The whole stream and each field are unbounded, while the preamble is
+    /// Each field is unbounded, while the preamble is
     /// limited to 32 KiB and each field's header block to 64 KiB.
     pub fn new() -> Self {
         Self::default()
-    }
-
-    /// Sets size limit for the whole stream.
-    pub const fn whole_stream(mut self, limit: u64) -> Self {
-        self.whole_stream = limit;
-        self
     }
 
     /// Sets the size limit for data before the first multipart boundary.
@@ -76,7 +69,6 @@ impl SizeLimit {
 impl Default for SizeLimit {
     fn default() -> Self {
         Self {
-            whole_stream: constants::DEFAULT_WHOLE_STREAM_SIZE_LIMIT,
             preamble: constants::DEFAULT_PREAMBLE_SIZE_LIMIT,
             per_field: constants::DEFAULT_PER_FIELD_SIZE_LIMIT,
             headers: constants::DEFAULT_HEADERS_SIZE_LIMIT,

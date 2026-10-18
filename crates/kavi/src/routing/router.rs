@@ -149,8 +149,8 @@ impl<S: 'static> Router<S> {
 
     /// Registers an exact HTTP method using a typed path's declared pattern.
     ///
-    /// The controller still takes one owned request. Extract the path value
-    /// inside the controller through [`crate::http::RequestExt::extract_head`].
+    /// The controller still takes one mutable request reference. Extract the path
+    /// value inside the controller through [`crate::http::RequestExt::extract_head`].
     #[track_caller]
     pub fn typed_on<P: TypedPath>(&mut self, method: Method, controller: impl Controller<S>) -> Route<'_, S> {
         self.typed_methods::<P>([method], controller)

@@ -57,7 +57,7 @@ impl Multipart {
         Self {
             state: MultipartState {
                 budget: WorkBudget::new(),
-                buffer: StreamBuffer::new(body, constraints.size_limit.whole_stream),
+                buffer: StreamBuffer::new(body),
                 boundary_bytes,
                 field_boundary_bytes,
                 stage: StreamingStage::FindingFirstBoundary,

@@ -66,20 +66,16 @@ pub struct StreamBuffer {
     body: crate::http::Body,
     budget: WorkBudget,
     pending_boundary: Option<(usize, usize)>,
-    pub(crate) whole_stream_size_limit: u64,
-    pub(crate) stream_size_counter: u64,
 }
 
 impl StreamBuffer {
-    pub fn new(body: crate::http::Body, whole_stream_size_limit: u64) -> Self {
+    pub fn new(body: crate::http::Body) -> Self {
         StreamBuffer {
             eof: false,
             buf: BytesMut::new(),
             body,
             budget: WorkBudget::new(),
             pending_boundary: None,
-            whole_stream_size_limit,
-            stream_size_counter: 0,
         }
     }
 
@@ -95,19 +91,8 @@ impl StreamBuffer {
                     let Ok(data) = frame.into_data() else {
                         continue;
                     };
-                    // Saturating add prevents an attacker from overflowing
-                    // the counter back to zero to bypass the size check.
-                    self.stream_size_counter = self.stream_size_counter.saturating_add(data.len() as u64);
-
-                    if self.stream_size_counter > self.whole_stream_size_limit {
-                        self.body.recycle(data);
-                        return Err(Error::StreamSizeExceeded {
-                            limit: self.whole_stream_size_limit,
-                        });
-                    }
-
                     let empty = data.is_empty();
-                    self.buf.extend_from_slice(&data);
+                    self.buf.extend_from_slice(data.as_ref());
                     self.body.recycle(data);
                     if empty {
                         continue;

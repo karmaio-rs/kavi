@@ -45,8 +45,8 @@ pub(super) fn expand(args: TokenStream, mut function: ItemFn, kind: Kind) -> syn
     };
     if signature.inputs.len() < leading {
         let message = match kind {
-            Kind::Controller => "a controller requires an owned Request parameter",
-            Kind::Middleware => "middleware requires Request and Next parameters",
+            Kind::Controller => "a controller requires a mutable Request reference",
+            Kind::Middleware => "middleware requires a mutable Request reference and Next",
         };
         return Err(syn::Error::new_spanned(signature, message));
     }
@@ -287,10 +287,10 @@ pub(super) fn expand(args: TokenStream, mut function: ItemFn, kind: Kind) -> syn
             #[inline]
             async fn handle(
                 &self,
-                #request: #path::http::Request,
+                #request: &mut #path::http::Request,
                 #continuation
                 #dependencies: &#state,
-            ) -> ::core::result::Result<#path::http::Response, #path::Error> {
+            ) -> #path::http::Response {
                 self.#invoke_name(#request, #call_continuation #(#arguments),*).await
             }
         }

@@ -10,13 +10,12 @@
 //! and encryption are opt-in through [`config::CryptoRule`]. Use the same
 //! configured [`Processor`] for incoming and outgoing cookies.
 //!
-//! [`super::RequestExt::cookies`] uses a [`Processor`] from request extensions,
-//! or a shared default when none is installed. Cookie middleware can own the
-//! configured processor, install it in each request's extensions, and use the
-//! same policy to process outgoing [`ResponseCookies`]. Controllers read cookies
-//! through the request without receiving configuration as an application dependency.
-//! Applications requiring signing or encryption must install their processor;
-//! the default only performs percent-encoding and decoding.
+//! Available with the `cookies` feature. Keep the configured processor in the
+//! typed dependency root and pass it to [`super::RequestExt::cookies`] for lazy
+//! parsing. Register [`crate::http::middleware::CookieMiddleware`] to emit queued
+//! response cookies, or use [`super::ResponseExt::set_cookie`] to append them
+//! immediately. Neither the processor nor parsed cookies live in request
+//! extensions. Application and HTTP servers perform no cookie processing.
 
 pub use biscotti::{
     Expiration, Key, Processor, ProcessorConfig, RemovalCookie, RequestCookie, RequestCookies, ResponseCookie,
@@ -25,15 +24,26 @@ pub use biscotti::{
 
 use super::Request;
 use http::{header::COOKIE, header::ToStrError};
-use std::sync::OnceLock;
 
-/// Resolves the request's effective cookie policy without rebuilding the default.
-pub(crate) fn processor(request: &Request) -> &Processor {
-    static DEFAULT_PROCESSOR: OnceLock<Processor> = OnceLock::new();
-    request
-        .extensions()
-        .get::<Processor>()
-        .unwrap_or_else(|| DEFAULT_PROCESSOR.get_or_init(|| ProcessorConfig::default().into()))
+/// Encodes and validates all generated cookies before appending any headers.
+///
+/// Called by CookieMiddleware after its downstream chain returns. The response's
+/// store is consumed, so nested middleware cannot emit the same queue twice.
+pub(crate) fn emit(
+    response: &mut super::Response,
+    processor: &Processor,
+) -> Result<(), http::header::InvalidHeaderValue> {
+    let Some(cookies) = response.extensions_mut().remove::<ResponseCookies<'static>>() else {
+        return Ok(());
+    };
+    let values = cookies
+        .header_values(processor)
+        .map(|value| http::HeaderValue::from_str(&value))
+        .collect::<Result<Vec<_>, _>>()?;
+    for value in values {
+        response.headers_mut().append(http::header::SET_COOKIE, value);
+    }
+    Ok(())
 }
 
 /// A failure while reading and processing incoming request cookies.
@@ -47,31 +57,20 @@ pub enum CookieError {
     Parse(#[from] errors::ParseError),
 }
 
-/// Parses every Cookie header using the request's configured or default processor.
+/// Parses every Cookie header using the supplied processor.
 ///
 /// The resulting collection borrows the header strings where possible. All
 /// values with the same name are retained in header order; [`RequestCookies::get`]
 /// returns the first, while [`RequestCookies::get_all`] exposes all of them.
 /// No Cookie headers yields an empty collection. Request headers are unchanged.
+/// Signing and encryption use the supplied configuration.
 ///
 /// # Errors
 ///
 /// Returns [`CookieError::Header`] for an unreadable header or
 /// [`CookieError::Parse`] for malformed syntax, invalid decoded UTF-8, or failed
 /// cryptographic verification. No partially parsed collection is returned.
-pub fn from_headers(request: &Request) -> Result<RequestCookies<'_>, CookieError> {
-    from_headers_with(request, processor(request))
-}
-
-/// Parses every Cookie header using an explicitly supplied processor.
-///
-/// The collection borrows the request's headers, not the processor. Signing and
-/// encryption use the supplied configuration. This low-level override does not
-/// change the processor in request extensions or the outgoing cookie policy.
-///
-/// # Errors
-/// Returns [`CookieError`] for unreadable headers or failed cookie processing.
-pub fn from_headers_with<'a>(request: &'a Request, processor: &Processor) -> Result<RequestCookies<'a>, CookieError> {
+pub fn from_headers<'a>(request: &'a Request, processor: &Processor) -> Result<RequestCookies<'a>, CookieError> {
     let mut cookies = RequestCookies::new();
     for value in request.headers().get_all(COOKIE) {
         cookies.extend_from_header(value.to_str()?, processor)?;

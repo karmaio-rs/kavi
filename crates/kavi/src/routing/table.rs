@@ -1,10 +1,9 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, str::Utf8Error};
 
 use super::{RouteInfo, UrlError, matcher::Matcher};
 use crate::{
-    Error,
-    dispatch::{ErasedController, ErasedMiddleware, Next, Terminal},
-    http::{Body, HeaderValue, Method, Request, Response, RoutingInfo, StatusCode, Uri, header},
+    dispatch::{ErasedController, ErasedMiddleware},
+    http::{Method, RoutingInfo, Uri},
 };
 
 pub(super) struct Endpoint {
@@ -12,27 +11,42 @@ pub(super) struct Endpoint {
     pub(super) chain: Vec<usize>,
 }
 
+pub(crate) struct SelectedEndpoint<'a> {
+    pub(crate) controller: &'a dyn ErasedController,
+    pub(crate) chain: &'a [usize],
+    pub(crate) metadata: Option<RoutingInfo>,
+}
+
+/// Route-recognition failures; Application chooses their HTTP responses.
+pub(crate) enum RecognitionError {
+    InvalidCapture(Utf8Error),
+    MethodNotAllowed(Vec<Method>),
+    NotFound,
+}
+
 /// Immutable method indexes, route metadata, and owned dispatch endpoints.
 ///
-/// Calls borrow the table and may run concurrently on a local worker. Recognition
-/// uses the original method and URI path before middleware; changing either in
-/// middleware does not select another route. Routing never consumes or replays
-/// the request body. Matching is case-sensitive, ignores the query, and preserves
+/// The application asks the table to recognize the effective method and URI after
+/// application middleware. It then runs the selected middleware and controller.
+/// The table never invokes handlers, renders errors, or finalizes responses.
+/// Changing the request in route middleware does not select another route.
+/// Matching is case-sensitive, ignores the query, and preserves
 /// repeated and trailing slashes.
 ///
 /// Captures are percent-decoded once when evaluating structural candidates.
 /// Constraint failures allow backtracking. Encoded slashes do not
 /// change the matched path structure; malformed percent escapes remain literal.
-/// Invalid decoded UTF-8 returns a fallible 400. Routing metadata is present only
-/// for successfully selected routes with valid captures; misses and errors clear
-/// metadata from any earlier pass.
+/// Invalid decoded UTF-8 returns a routing failure converted to a 400 by Application.
+/// Recognition returns metadata only for successfully selected routes with valid
+/// captures. The application installs it on the request and clears metadata from
+/// earlier passes.
 /// Unchanged captures borrow an owned URI snapshot through byte ranges, so
 /// middleware URI changes preserve their original values. Names and route labels
 /// share one request-owned buffer. Other-method probes build no routing metadata.
 ///
-/// Unmatched paths invoke the root fallback or return a fallible 404. When other
-/// methods match, dispatch returns a fallible 405 with a sorted `Allow` header,
-/// including implicit HEAD. OPTIONS requires explicit registration. Table
+/// Unmatched paths select the root fallback or return a routing failure for a 404.
+/// When other methods match, recognition returns a failure for a 405 with a sorted
+/// `Allow` header, including implicit HEAD. OPTIONS requires explicit registration. Table
 /// middleware wraps every outcome; group and route middleware wrap selected routes.
 /// Merged-router middleware wraps its imported endpoints and imported fallback.
 /// Middleware is registered on [`super::Router`] before building the table. Each
@@ -79,94 +93,67 @@ impl RoutingTable {
             .ok_or_else(|| UrlError::UnknownRoute { name: name.to_owned() })
     }
 
-    /// Recognizes and dispatches one owned request through a consuming middleware chain.
-    ///
-    /// HEAD keeps its method for middleware and controllers. Successful responses
-    /// lose their body after table middleware returns; a known body size supplies
-    /// Content-Length when absent and permitted by the status. An outer rendering
-    /// or transport boundary must enforce HEAD semantics if it renders an error
-    /// or replaces the response.
-    ///
-    /// # Errors
-    /// Returns 400 for invalid decoded capture UTF-8, 404 for unmatched paths
-    /// without a fallback, 405 for unsupported methods, or middleware/controller errors.
-    pub async fn handle(&self, mut request: Request) -> Result<Response, Error> {
-        let head = request.method() == Method::HEAD;
-        let (chain, terminal) = match self.select(&mut request) {
-            Ok((chain, controller)) => (chain, Terminal::Controller(controller)),
-            Err(error) => (self.table_chain.as_slice(), Terminal::Error(error)),
-        };
-        let mut response = Next::new(&self.middleware, chain, terminal).run(request).await?;
-
-        if head {
-            let status = response.status();
-            if !status.is_informational()
-                && status != StatusCode::NO_CONTENT
-                && status != StatusCode::NOT_MODIFIED
-                && !response.headers().contains_key(header::CONTENT_LENGTH)
-                && !response.headers().contains_key(header::TRANSFER_ENCODING)
-                && let Some(length) = response.body().size_hint().exact()
-            {
-                response
-                    .headers_mut()
-                    .insert(header::CONTENT_LENGTH, HeaderValue::from(length));
-            }
-            *response.body_mut() = Body::empty();
-        }
-
-        Ok(response)
+    pub(crate) fn middleware(&self) -> &[Box<dyn ErasedMiddleware>] {
+        &self.middleware
     }
 
-    fn select(&self, request: &mut Request) -> Result<(&[usize], &dyn ErasedController), Error> {
-        request.extensions_mut().remove::<RoutingInfo>();
-        let path = request.uri().path();
+    pub(crate) fn error_chain(&self) -> &[usize] {
+        &self.table_chain
+    }
+
+    pub(crate) fn recognize(
+        &self,
+        method_to_match: &Method,
+        uri: &Uri,
+    ) -> Result<SelectedEndpoint<'_>, RecognitionError> {
+        let path = uri.path();
 
         if path.starts_with('/') {
-            if let Some(paths) = self.paths.get(request.method())
-                && let Some(matched) = paths
-                    .at(path, &self.routes)
-                    .map_err(|source| Error::with_status(StatusCode::BAD_REQUEST, source))?
+            if let Some(paths) = self.paths.get(method_to_match)
+                && let Some(matched) = paths.at(path, &self.routes).map_err(RecognitionError::InvalidCapture)?
             {
                 let info = &self.routes[matched.id];
                 let endpoint = &self.endpoints[matched.id];
                 let metadata = RoutingInfo::new(
-                    request.uri(),
+                    uri,
                     info.path(),
                     info.name.as_deref(),
                     info.pattern.captures.iter().map(|capture| capture.name.as_str()),
                     matched.params,
                 );
-                request.extensions_mut().insert(metadata);
-                return Ok((&endpoint.chain, &*endpoint.controller));
+                return Ok(SelectedEndpoint {
+                    controller: &*endpoint.controller,
+                    chain: &endpoint.chain,
+                    metadata: Some(metadata),
+                });
             }
 
             let mut allowed = Vec::new();
             for (method, paths) in &self.paths {
-                if method == request.method() {
+                if method == method_to_match {
                     continue;
                 }
                 if paths
                     .matches(path, &self.routes)
-                    .map_err(|source| Error::with_status(StatusCode::BAD_REQUEST, source))?
+                    .map_err(RecognitionError::InvalidCapture)?
                 {
-                    allowed.push(method.as_str());
+                    allowed.push(method.clone());
                 }
             }
 
             if !allowed.is_empty() {
-                allowed.sort_unstable();
-                let mut error = Error::status(StatusCode::METHOD_NOT_ALLOWED);
-                error.headers_mut().insert(
-                    header::ALLOW,
-                    HeaderValue::try_from(allowed.join(", ")).expect("HTTP methods are valid header tokens"),
-                );
-                return Err(error);
+                allowed.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
+                return Err(RecognitionError::MethodNotAllowed(allowed));
             }
         }
 
         match &self.fallback {
-            Some(endpoint) => Ok((&endpoint.chain, &*endpoint.controller)),
-            None => Err(Error::status(StatusCode::NOT_FOUND)),
+            Some(endpoint) => Ok(SelectedEndpoint {
+                controller: &*endpoint.controller,
+                chain: &endpoint.chain,
+                metadata: None,
+            }),
+            None => Err(RecognitionError::NotFound),
         }
     }
 }

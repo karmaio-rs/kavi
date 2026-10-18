@@ -2,13 +2,11 @@ use std::borrow::Cow;
 
 use encoding_rs::Encoding;
 
-pub const DEFAULT_WHOLE_STREAM_SIZE_LIMIT: u64 = u64::MAX;
 pub const DEFAULT_PER_FIELD_SIZE_LIMIT: u64 = u64::MAX;
 pub const DEFAULT_HEADERS_SIZE_LIMIT: u64 = 64 * 1024;
 
 // Default limit for preamble bytes (data before the first boundary). Applied
-// independently of the whole-stream limit and configurable through
-// `SizeLimit::preamble`.
+// by the parser and configurable through `SizeLimit::preamble`.
 pub const DEFAULT_PREAMBLE_SIZE_LIMIT: u64 = 32 * 1024;
 
 pub const MAX_HEADERS: usize = 32;

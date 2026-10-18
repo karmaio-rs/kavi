@@ -23,6 +23,9 @@
 //! and merges. Retain that context outside routing for jobs, tasks, and resource
 //! shutdown. [`Router::build`] compiles declarations requiring no dependencies.
 //! The compiled table erases dependency types after binding.
+//! It recognizes routes and retains their compiled registrations; it never runs
+//! controllers or middleware. [`crate::Application`] owns dispatch, metadata
+//! installation, framework rejection responses, and final response processing.
 //! String routes and optional [`TypedPath`] values share the same runtime
 //! pattern representation, encoding, and constraint semantics. Both declaration
 //! styles accept Unicode literals and preserve valid percent escapes.
@@ -32,44 +35,6 @@
 //! [`RoutingTable::url_for`], or generate independently with [`Pattern`] and
 //! typed values. Typed prefixes are concrete, explicit paths.
 //!
-//! ```text
-//! use kavi::{Error, http::{Request, RequestExt, Response, response::text}};
-//! use kavi::dispatch::Next;
-//! use kavi::routing::{Group, Router, TypedPath};
-//!
-//! #[derive(TypedPath)]
-//! #[typed_path("/users/{id}")]
-//! struct UserPath {
-//!     #[typed_path(constraint = r"[0-9]+")]
-//!     id: u64,
-//! }
-//!
-//! async fn log_route(request: Request, next: Next<'_>) -> Result<Response, Error> {
-//!     eprintln!("Route: {:?}", request.route_name());
-//!     next.run(request).await
-//! }
-//!
-//! async fn show(request: Request) -> Result<Response, Error> {
-//!     let UserPath { id } = request.extract_head::<UserPath>().await?;
-//!     Ok(text(format!("User {id}")))
-//! }
-//!
-//! let mut router = Router::new();
-//! router.middleware(log_route);
-//! router.group(Group::new("/api").name_prefix("users."), |routes| {
-//!     routes.typed_get::<UserPath>(show).name("show");
-//! });
-//! let table = router.build()?;
-//! let path = UserPath { id: 42 }.to_uri_with_prefix("/api")?;
-//! let named = table.path_for("users.show", &[("id", "42")])?;
-//! let url = UserPath { id: 42 }.to_url_with_prefix("/api", &"https://example.com".parse()?)?;
-//! ```
-//!
-//! Behavioral coverage is deferred for grammar errors, literal and capture
-//! encoding, capture counts beyond 25, constraint ordering and backtracking,
-//! tuple extraction beneath groups, HEAD/405 behavior, middleware and fallbacks,
-//! and typed/untyped generation consistency. The full coverage list is in `UPSTREAM.md`.
-
 mod error;
 mod group;
 mod matcher;
@@ -88,6 +53,7 @@ pub use params::RouteParams;
 pub use pattern::{Pattern, PatternError};
 pub use route::{Route, RouteInfo};
 pub use router::Router;
+pub(crate) use table::RecognitionError;
 pub use table::RoutingTable;
 pub use typed_path::TypedPath;
 

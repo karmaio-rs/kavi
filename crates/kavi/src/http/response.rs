@@ -13,25 +13,47 @@ use crate::{
     http::{Body, Response},
 };
 
-use super::cookies::ResponseCookies;
+#[cfg(feature = "cookies")]
+use super::cookies::{Processor, ResponseCookie, ResponseCookies};
 
 /// Response extension helpers.
 ///
-/// Import this trait alongside [`Response`] to access the methods
+/// Import this trait alongside [`Response`] to access queued and immediate cookie
+/// operations. Available with the `cookies` feature.
+#[cfg(feature = "cookies")]
 pub trait ResponseExt {
     /// Borrows the outgoing store, if one has been initialized.
     ///
-    /// Response construction does not serialize this store into headers. Cookie
-    /// middleware must process it with the request's effective processor and emit
-    /// each outgoing cookie once.
+    /// Response construction does not serialize this store into headers.
+    /// CookieMiddleware consumes this store on the way out of its downstream chain.
+    /// Without that middleware, queued cookies are not emitted.
     fn cookies(&self) -> Option<&ResponseCookies<'static>>;
 
     /// Borrows the outgoing store, initializing an empty one when necessary.
     ///
     /// The store belongs to this response and must not be shared across requests.
+    /// Register CookieMiddleware outside every component that queues cookies in
+    /// this scope. Use [`Self::set_cookie`] when no emission middleware is wanted.
     fn cookies_mut(&mut self) -> &mut ResponseCookies<'static>;
+
+    /// Processes and appends one cookie immediately, without emission middleware.
+    ///
+    /// Accepts a response cookie, a name/value pair, or a removal cookie. Uses
+    /// the supplied processor for encoding, signing, or encryption. Existing
+    /// Set-Cookie headers and the pending queue are unchanged. Repeated calls
+    /// append distinct header fields rather than replacing earlier ones.
+    ///
+    /// # Errors
+    /// Returns an invalid-header error if the processed cookie cannot be encoded
+    /// as an HTTP header. On failure no header is appended.
+    fn set_cookie<'c>(
+        &mut self,
+        cookie: impl Into<ResponseCookie<'c>>,
+        processor: &Processor,
+    ) -> Result<(), http::header::InvalidHeaderValue>;
 }
 
+#[cfg(feature = "cookies")]
 impl ResponseExt for Response {
     #[inline]
     fn cookies(&self) -> Option<&ResponseCookies<'static>> {
@@ -41,6 +63,17 @@ impl ResponseExt for Response {
     #[inline]
     fn cookies_mut(&mut self) -> &mut ResponseCookies<'static> {
         self.extensions_mut().get_or_insert_default()
+    }
+
+    fn set_cookie<'c>(
+        &mut self,
+        cookie: impl Into<ResponseCookie<'c>>,
+        processor: &Processor,
+    ) -> Result<(), http::header::InvalidHeaderValue> {
+        let value = processor.process_outgoing(cookie.into()).to_string();
+        let value = HeaderValue::from_str(&value)?;
+        self.headers_mut().append(http::header::SET_COOKIE, value);
+        Ok(())
     }
 }
 
@@ -86,7 +119,7 @@ pub fn bytes<T: Into<Body>>(value: T) -> Response {
 /// # Errors
 ///
 /// Returns an internal framework error retaining the [`serde_json::Error`] source
-/// when serialization fails. The error remains available to outer middleware.
+/// when serialization fails. Handle the error locally before returning a Response.
 pub fn json<T: serde::Serialize>(value: T) -> Result<Response, Error> {
     let bytes = serde_json::to_vec(&value).map_err(Error::internal)?;
     Ok(with_content_type(Body::from(bytes), "application/json"))

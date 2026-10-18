@@ -4,29 +4,28 @@ use vakya::body::CollectError;
 
 use crate::http::{
     Body, MetadataError, Response, StatusCode,
-    cookies::CookieError,
+    body::BodyLimitExceeded,
     extract::{BodyError, FormError, JsonError, ParamError, PathError, QueryError, TextError},
     multipart::MultipartError,
 };
 
-/// A dispatch failure with an HTTP status and an optional typed source.
+#[cfg(feature = "cookies")]
+use crate::http::cookies::CookieError;
+
+/// A failure with an HTTP status, response headers, and an optional typed source.
 ///
-/// Errors remain fallible through middleware; use [`Self::into_response`] at an
-/// explicit error-rendering boundary. The default renderer produces an empty
-/// response and never exposes source details to a client.
+/// Fallible helpers and extractors can return typed errors. Controllers and
+/// middleware handle these locally and return a Response. Use
+/// [`Self::into_response`] for an empty response with the assigned status and
+/// headers, or inspect the source and construct an application-specific response.
+/// Source details are never exposed by this conversion.
 ///
 /// Sources need not be `Send` or `Sync`, matching Karmaio's local execution model.
 /// Formatting reports the HTTP status; inspect [`StdError::source`] or
 /// [`Self::downcast_ref`] for the underlying details.
 ///
-/// ```text
-/// use kavi::Error;
-///
-/// let error = Error::internal(std::io::Error::other("private database detail"));
-/// let response = error.into_response();
-/// ```
 #[derive(thiserror::Error)]
-#[error("HTTP dispatch failed: {status}")]
+#[error("HTTP request failed: {status}")]
 pub struct Error {
     status: StatusCode,
     #[source]
@@ -37,7 +36,7 @@ pub struct Error {
 impl Error {
     /// Creates an intentional HTTP failure without an underlying source.
     ///
-    /// The supplied status is retained as-is for the final rendering boundary.
+    /// The supplied status is retained as-is when converted to a response.
     #[inline]
     pub fn status(status: StatusCode) -> Self {
         Self {
@@ -63,7 +62,7 @@ impl Error {
         }
     }
 
-    /// Borrows response headers retained for the error renderer.
+    /// Borrows headers retained for response conversion.
     pub fn headers(&self) -> &http::HeaderMap {
         &self.headers
     }
@@ -89,8 +88,8 @@ impl Error {
 
     /// Explicitly renders this failure as an empty response with its HTTP status.
     ///
-    /// Call this after middleware has had an opportunity to inspect or recover
-    /// the error. Applications can instead implement their own rendering policy.
+    /// Call this where the failure is handled. Outer middleware receives the
+    /// resulting response and can inspect or replace it normally.
     #[inline]
     pub fn into_response(self) -> Response {
         let mut response = Response::new(Body::empty());
@@ -135,7 +134,15 @@ impl From<Infallible> for Error {
 fn collection_status(source: &CollectError<vakya::error::Error>) -> StatusCode {
     match source {
         CollectError::LimitExceeded { .. } => StatusCode::PAYLOAD_TOO_LARGE,
+        CollectError::Body(error) if body_limit_source(error) => StatusCode::PAYLOAD_TOO_LARGE,
         _ => StatusCode::INTERNAL_SERVER_ERROR,
+    }
+}
+
+impl From<BodyLimitExceeded> for Error {
+    #[inline]
+    fn from(source: BodyLimitExceeded) -> Self {
+        Self::with_status(StatusCode::PAYLOAD_TOO_LARGE, source)
     }
 }
 
@@ -173,19 +180,24 @@ impl From<FormError> for Error {
 impl From<MultipartError> for Error {
     #[inline]
     fn from(source: MultipartError) -> Self {
-        let status = match &source {
-            MultipartError::NoMultipart | MultipartError::DecodeContentType(_) => StatusCode::UNSUPPORTED_MEDIA_TYPE,
-            MultipartError::FieldSizeExceeded { .. }
-            | MultipartError::StreamSizeExceeded { .. }
-            | MultipartError::PreambleSizeExceeded { .. }
-            | MultipartError::HeadersSizeExceeded { .. }
-            | MultipartError::BoundaryPaddingSizeExceeded { .. }
-            | MultipartError::FieldCountExceeded { .. }
-            | MultipartError::ReadHeaderFailed(httparse::Error::TooManyHeaders) => StatusCode::PAYLOAD_TOO_LARGE,
-            MultipartError::StreamReadFailed(_) | MultipartError::Write(_) | MultipartError::Terminated => {
-                StatusCode::INTERNAL_SERVER_ERROR
+        let status = if body_limit_source(&source) {
+            StatusCode::PAYLOAD_TOO_LARGE
+        } else {
+            match &source {
+                MultipartError::NoMultipart | MultipartError::DecodeContentType(_) => {
+                    StatusCode::UNSUPPORTED_MEDIA_TYPE
+                }
+                MultipartError::FieldSizeExceeded { .. }
+                | MultipartError::PreambleSizeExceeded { .. }
+                | MultipartError::HeadersSizeExceeded { .. }
+                | MultipartError::BoundaryPaddingSizeExceeded { .. }
+                | MultipartError::FieldCountExceeded { .. }
+                | MultipartError::ReadHeaderFailed(httparse::Error::TooManyHeaders) => StatusCode::PAYLOAD_TOO_LARGE,
+                MultipartError::StreamReadFailed(_) | MultipartError::Write(_) | MultipartError::Terminated => {
+                    StatusCode::INTERNAL_SERVER_ERROR
+                }
+                _ => StatusCode::BAD_REQUEST,
             }
-            _ => StatusCode::BAD_REQUEST,
         };
         Self::with_status(status, source)
     }
@@ -239,6 +251,7 @@ impl From<QueryError> for Error {
     }
 }
 
+#[cfg(feature = "cookies")]
 impl From<CookieError> for Error {
     #[inline]
     fn from(source: CookieError) -> Self {
@@ -249,7 +262,25 @@ impl From<CookieError> for Error {
 impl From<vakya::error::Error> for Error {
     fn from(source: vakya::error::Error) -> Self {
         let status = StatusCode::INTERNAL_SERVER_ERROR;
-        //TODO: Add middleware limit error here later
+        let status = if body_limit_source(&source) {
+            StatusCode::PAYLOAD_TOO_LARGE
+        } else {
+            status
+        };
         Self::with_status(status, source)
     }
+}
+
+fn body_limit_source(error: &(dyn StdError + 'static)) -> bool {
+    let mut current = Some(error);
+    while let Some(error) = current {
+        if error.is::<BodyLimitExceeded>() {
+            return true;
+        }
+        current = match error.downcast_ref::<io::Error>().and_then(io::Error::get_ref) {
+            Some(inner) => Some(inner as &(dyn StdError + 'static)),
+            None => error.source(),
+        };
+    }
+    false
 }

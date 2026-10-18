@@ -23,14 +23,14 @@ struct Bound<T, S> {
 
 impl<T: Controller<S>, S> ErasedController for Bound<T, S> {
     #[inline]
-    fn call(&self, request: Request) -> DispatchFuture<'_> {
+    fn call<'r>(&'r self, request: &'r mut Request) -> DispatchFuture<'r> {
         Box::pin(self.handler.handle(request, &self.dependencies))
     }
 }
 
 impl<T: Middleware<S>, S> ErasedMiddleware for Bound<T, S> {
     #[inline]
-    fn call<'a>(&'a self, request: Request, next: Next<'a>) -> DispatchFuture<'a> {
+    fn call<'r>(&'r self, request: &'r mut Request, next: Next<'r>) -> DispatchFuture<'r> {
         Box::pin(self.handler.handle(request, next, &self.dependencies))
     }
 }

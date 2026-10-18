@@ -37,14 +37,14 @@ pub fn derive_dependencies(input: TokenStream) -> TokenStream {
 
 /// Generates an automatically bound controller from a free async function.
 ///
-/// The first parameter is an owned Request; subsequent parameters are shared
-/// references to application dependencies, or owned dependencies annotated with
-/// `#[dependency(clone)]`. Each owned binding requires `Clone` and clones the
-/// provided value once per invocation. Mutable references and cloning borrowed
-/// parameters are rejected. The function must return Kavi's
-/// `Result<Response, Error>` contract. The original name becomes a zero-argument
-/// factory returning a zero-sized controller: register it with `router.get(path,
-/// show())`. The returned controller's `call` method accepts the original arguments
+/// The first parameter is a mutable Request reference; subsequent parameters are
+/// shared references to application dependencies, or owned dependencies annotated
+/// with `#[dependency(clone)]`. Each owned binding requires `Clone` and clones the
+/// provided value once per invocation. Mutable dependency references and cloning
+/// borrowed parameters are rejected. The function must return Kavi's Response
+/// directly, handling business and extraction errors locally. The original name
+/// becomes a zero-argument factory returning a zero-sized controller: register it
+/// with `router.get(path, show())`. The returned controller's `call` method accepts the original arguments
 /// for direct invocation as `show().call(request, &service).await`. Calling the
 /// factory does not execute the handler or allocate. Application dependencies are
 /// checked at registration and never stored in the request.
@@ -91,9 +91,9 @@ pub fn controller(args: TokenStream, input: TokenStream) -> TokenStream {
 
 /// Generates automatically bound middleware from a free async function.
 ///
-/// Parameters begin with an owned Request and a consuming Next, followed by
-/// shared references or explicitly cloned owned application dependencies. The
-/// return contract, generic support, generated factory, and `call` method match
+/// Parameters begin with a mutable Request reference and a consuming Next,
+/// followed by shared references or explicitly cloned owned application dependencies.
+/// The return contract, generic support, generated factory, and `call` method match
 /// [`controller`]. Register the returned
 /// middleware with `router.middleware(authenticate())`. Dependencies may remain
 /// borrowed across downstream execution. Dependency parameters may be conditionally compiled;

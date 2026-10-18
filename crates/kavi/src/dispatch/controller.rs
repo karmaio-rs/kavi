@@ -1,81 +1,46 @@
 use std::ops::AsyncFn;
 
-use crate::{
-    Error,
-    http::{Request, Response},
-};
+use crate::http::{Request, Response};
 
 use super::DispatchFuture;
 
-/// Handles one routed request with application dependencies of type `S`.
+/// Handles a borrowed request using application dependencies of type `S`.
 ///
-/// The [`crate::controller`] macro implements this trait with a
-/// [`super::Provide`] bound for each dependency parameter. Call the generated
-/// factory when registering a controller, as in `router.get(path, show())`.
-/// Routers check those bounds at registration and bind the shared dependency
-/// owner when building the routing table. Dependencies stay outside the request
-/// and may be borrowed across `.await`.
-/// An owned dependency marked `#[dependency(clone)]` is explicitly cloned for
-/// each invocation; borrowed parameters do not require `Clone`. Generic adapters
-/// retain type and const parameters, while borrow lifetimes belong to each call.
-/// The generated adapter's `call` method accepts explicit arguments without
-/// provider access or cloning, so it can also be invoked directly.
+/// The application retains ownership of the request throughout dispatch. A
+/// controller may read or modify its head and consume its body through
+/// [`crate::http::RequestExt`]. It returns an owned response whose body may
+/// outlive dispatch; that body cannot borrow the request.
 ///
-/// Async functions and reusable async closures automatically implement this trait
-/// for any `S` when they accept one [`Request`] and return [`Result<Response, Error>`],
-/// ignoring the supplied dependency root.
-/// Use response helpers such as [`text`](crate::http::response::text) and
-/// [`json`](crate::http::response::json) to build the response. Convert application
-/// errors into [`Error`] inside the controller.
+/// The [`crate::controller`] macro binds borrowed dependency parameters through
+/// [`super::Provide`]. Call the generated factory when registering a controller.
+/// Dependencies remain outside the request and can be borrowed across await
+/// points. `#[dependency(clone)]` explicitly acquires an owned dependency handle.
 ///
-/// The controller must own its captures or borrow them for `'static`, but
-/// each call's future may borrow both the controller and `S`. Neither the controller
-/// nor its futures are required to be `Send` or `Sync`. Calls use `&self`, so an
-/// instance may serve interleaved requests.
+/// Business and extraction failures must be handled by the controller and mapped
+/// to an appropriate response. No error is propagated through the dispatch chain.
+/// Fallible response helpers and extractors retain their typed error APIs.
 ///
-/// Errors remain fallible so outer middleware can inspect or recover them before
-/// an explicit rendering boundary calls [`Error::into_response`] or an
-/// application-specific renderer. Returning a streaming response does not wait
-/// for its body to be sent.
-///
-/// ```
-/// use kavi::{
-///     Error,
-///     http::{Request, Response, response::{json, text}},
-/// };
-///
-/// async fn health(_: Request) -> Result<Response, Error> {
-///     Ok(text("ok"))
-/// }
-///
-/// async fn details(_: Request) -> Result<Response, Error> {
-///     json(true)
-/// }
-/// ```
+/// Async functions and reusable async closures accepting `&mut Request` and
+/// returning Response implement this trait automatically, ignoring `S`.
+/// Controllers own their captures or borrow them for `'static`; call futures may
+/// borrow the controller, request, and services. Neither needs to be Send or Sync.
 #[allow(async_fn_in_trait)]
 pub trait Controller<S = ()>: 'static {
-    /// Handles the owned request and returns a concrete HTTP response.
-    ///
-    /// # Errors
-    ///
-    /// Returns the controller's framework error without rendering it.
-    async fn handle(&self, request: Request, dependencies: &S) -> Result<Response, Error>;
+    /// Handles the request and returns a complete response head and owned body.
+    async fn handle(&self, request: &mut Request, dependencies: &S) -> Response;
 }
 
 impl<F, S> Controller<S> for F
 where
-    F: AsyncFn(Request) -> Result<Response, Error> + 'static,
+    F: for<'r> AsyncFn(&'r mut Request) -> Response + 'static,
 {
     #[inline]
-    async fn handle(&self, request: Request, _: &S) -> Result<Response, Error> {
+    async fn handle(&self, request: &mut Request, _: &S) -> Response {
         self(request).await
     }
 }
 
-/// Object-compatible controller calls for heterogeneous routing storage.
-///
-/// Bound controllers retain their dependency owner and box each call's borrowed
-/// future. The future need not be `Send` or `'static`.
+/// Object-compatible calls whose futures borrow the request and bound owner.
 pub(crate) trait ErasedController {
-    fn call(&self, request: Request) -> DispatchFuture<'_>;
+    fn call<'r>(&'r self, request: &'r mut Request) -> DispatchFuture<'r>;
 }

@@ -8,7 +8,7 @@
 use std::{borrow::Cow, net::IpAddr};
 
 use super::{
-    ConnectionInfo, Request, RequestExt, Uri, header,
+    ConnectionInfo, Request, Uri, header,
     uri::{Authority, Scheme},
 };
 
@@ -33,9 +33,9 @@ pub enum MetadataError {
 ///
 /// The boundary captures this before pre-routing middleware. Effective values
 /// initially come from the transport and request target/Host. Only an explicit
-/// [`TrustedProxies`] changes them. Socket facts remain in [`ConnectionInfo`].
+/// [`crate::http::middleware::TrustedProxies`] changes them. Socket facts remain in [`ConnectionInfo`].
 #[derive(Clone, Debug)]
-pub(super) struct RequestMetadata {
+pub(crate) struct RequestMetadata {
     original_uri: Uri,
     scheme: Option<Scheme>,
     authority: Option<Authority>,
@@ -51,7 +51,7 @@ impl RequestMetadata {
     ///
     /// # Errors
     /// Rejects malformed authorities, repeated Host fields and non-HTTP schemes.
-    pub(super) fn capture(request: &Request) -> Result<Self, MetadataError> {
+    pub(crate) fn capture(request: &Request) -> Result<Self, MetadataError> {
         let mut hosts = request.headers().get_all(header::HOST).iter();
         let host = hosts
             .next()
@@ -115,92 +115,46 @@ impl RequestMetadata {
     }
 }
 
-/// Applies RFC 7239 Forwarded metadata through an explicitly trusted proxy chain.
-///
-/// `F` decides which peer IP addresses are trusted. No proxies are implicitly
-/// trusted, including loopback. Walks from the socket peer through rightmost
-/// elements until the first untrusted, unknown or obfuscated node. Values to its
-/// left cannot affect the origin. Trust assumes each accepted proxy appends or
-/// replaces its own element correctly and protects its connection to Kavi.
-/// Nonstandard X-Forwarded fields are ignored; they cannot be correlated reliably
-/// with RFC 7239 elements. Apply this before routing or other origin consumers.
-/// This policy also implements middleware for any application context; register
-/// it before middleware that reads the effective origin or client IP.
-/// Successful application captures initial request metadata even when no trusted
-/// forwarding headers are present. Applications read it through [`RequestExt`];
-/// its storage representation is private to HTTP handling.
-pub struct TrustedProxies<F> {
-    trusted: F,
-}
-
-impl<F: Fn(IpAddr) -> bool + 'static, S> crate::dispatch::Middleware<S> for TrustedProxies<F> {
-    async fn handle(
-        &self,
-        mut request: Request,
-        next: crate::dispatch::Next<'_>,
-        _: &S,
-    ) -> Result<super::Response, crate::Error> {
-        self.apply(&mut request)?;
-        next.run(request).await
-    }
-}
-
-impl<F: Fn(IpAddr) -> bool> TrustedProxies<F> {
-    /// Creates a policy using an application-selected peer trust predicate.
-    #[inline]
-    pub fn new(trusted: F) -> Self {
-        Self { trusted }
-    }
-
-    /// Updates only effective metadata, leaving transport facts and the URI intact.
-    ///
-    /// Captures the original target and initial origin if no metadata is present.
-    /// An unknown peer or untrusted socket peer causes all forwarding headers to
-    /// be ignored. Each accepted element supplies its own scheme and authority;
-    /// omitted values stay unknown rather than inheriting another hop's origin.
-    /// Unknown/obfuscated `for` values terminate traversal without inventing an IP.
-    /// Parsing failure leaves existing metadata unchanged. The serving boundary
-    /// should capture original metadata before any request rewriting.
-    ///
-    /// # Errors
-    /// Returns [`MetadataError`] for malformed trusted metadata or an invalid base origin.
-    pub fn apply(&self, request: &mut Request) -> Result<(), MetadataError> {
-        let Some(connection) = request.extensions().get::<ConnectionInfo>() else {
-            return request.capture_metadata();
-        };
-        let mut peer = connection.remote_addr.ip();
-        if !(self.trusted)(peer) {
-            return request.capture_metadata();
-        }
-        let mut elements = Vec::new();
-        for value in request.headers().get_all("forwarded") {
-            let value = value.to_str().map_err(|_| MetadataError::Forwarded)?;
-            elements.extend(split(value, b',')?);
-        }
-        if elements.is_empty() {
-            return request.capture_metadata();
-        }
-        let mut metadata = request
-            .extensions()
-            .get::<RequestMetadata>()
-            .cloned()
-            .map_or_else(|| RequestMetadata::capture(request), Ok)?;
-        for element in elements.into_iter().rev() {
-            if !(self.trusted)(peer) {
-                break;
-            }
-            let hop = Hop::parse(element)?;
-            metadata.scheme = hop.scheme;
-            metadata.authority = hop.authority;
-            metadata.client_ip = hop.client_ip;
-            let Some(client) = hop.client_ip else {
-                break;
-            };
-            peer = client;
-        }
+/// Parses trusted Forwarded fields and atomically updates effective request metadata.
+pub(crate) fn apply_forwarded(request: &mut Request, trusted: &impl Fn(IpAddr) -> bool) -> Result<(), MetadataError> {
+    let mut metadata = request
+        .extensions()
+        .get::<RequestMetadata>()
+        .cloned()
+        .map_or_else(|| RequestMetadata::capture(request), Ok)?;
+    let Some(connection) = request.extensions().get::<ConnectionInfo>() else {
         request.extensions_mut().insert(metadata);
-        Ok(())
+        return Ok(());
+    };
+    let mut peer = connection.remote_addr.ip();
+    if !trusted(peer) {
+        request.extensions_mut().insert(metadata);
+        return Ok(());
     }
+    let mut elements = Vec::new();
+    for value in request.headers().get_all("forwarded") {
+        let value = value.to_str().map_err(|_| MetadataError::Forwarded)?;
+        elements.extend(split(value, b',')?);
+    }
+    if elements.is_empty() {
+        request.extensions_mut().insert(metadata);
+        return Ok(());
+    }
+    for element in elements.into_iter().rev() {
+        if !trusted(peer) {
+            break;
+        }
+        let hop = Hop::parse(element)?;
+        metadata.scheme = hop.scheme;
+        metadata.authority = hop.authority;
+        metadata.client_ip = hop.client_ip;
+        let Some(client) = hop.client_ip else {
+            break;
+        };
+        peer = client;
+    }
+    request.extensions_mut().insert(metadata);
+    Ok(())
 }
 
 struct Hop {

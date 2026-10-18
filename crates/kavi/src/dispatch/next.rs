@@ -1,47 +1,29 @@
-use crate::{
-    Error,
-    http::{Request, Response},
-};
+use crate::http::{Request, Response};
 
 use super::{ErasedController, ErasedMiddleware};
 
-/// The remaining middleware and its selected terminal outcome.
+/// The remaining middleware chain and its selected terminal call or response.
 ///
-/// Each invoked middleware wraps the remainder: it runs before downstream
-/// middleware and the controller or routing error, then resumes when they
-/// return. Returning early skips the remainder; propagating an error with `?`
-/// skips subsequent code in that middleware.
+/// Each middleware borrows the request, invokes the consuming continuation at
+/// most once, and resumes when downstream produces an owned response. The
+/// request is available again after that await completes. Returning without
+/// calling run short-circuits the remainder.
 ///
-/// [`Self::run`] consumes this continuation, which cannot be cloned or copied.
-/// Returning without calling it short-circuits the chain. Construction belongs
-/// to the framework. The continuation borrows its middleware and selected
-/// controller for `'a`. A routing error is owned and delivered at most once.
-///
-/// ```compile_fail
-/// use kavi::{Error, dispatch::Next, http::{Body, Request, Response}};
-///
-/// async fn twice(next: Next<'_>, request: Request) -> Result<Response, Error> {
-///     next.run(request).await?;
-///     next.run(Request::new(Body::empty())).await // `next` was moved.
-/// }
-/// ```
+/// Next stores only execution structure. Application services are bound to the
+/// registered handlers; request metadata remains on the borrowed request.
 pub struct Next<'a> {
     middleware: &'a [Box<dyn ErasedMiddleware>],
     chain: &'a [usize],
     terminal: Terminal<'a>,
 }
 
-/// The controller or routing error at the end of a middleware chain.
 pub(crate) enum Terminal<'a> {
     Controller(&'a dyn ErasedController),
-    Error(Error),
+    // Framework rejection responses are cold; keep normal continuations compact.
+    Response(Box<Response>),
 }
 
 impl<'a> Next<'a> {
-    /// Borrows an owned middleware store and one complete compiled chain.
-    ///
-    /// The chain contains middleware in execution order, regardless of its scope.
-    /// Identifiers share instances across endpoints without cloning them.
     pub(crate) fn new(middleware: &'a [Box<dyn ErasedMiddleware>], chain: &'a [usize], terminal: Terminal<'a>) -> Self {
         Self {
             middleware,
@@ -50,23 +32,18 @@ impl<'a> Next<'a> {
         }
     }
 
-    /// Executes the remainder once, forwarding ownership of the request.
+    /// Executes the remainder once with a temporary mutable request borrow.
     ///
-    /// Invokes the next middleware, or delivers the terminal outcome if none remains.
-    /// Completion means a response or error was produced, not that a streaming
-    /// response body has finished sending.
-    ///
-    /// # Errors
-    ///
-    /// Returns routing, middleware, or controller errors without rendering them.
-    pub async fn run(mut self, request: Request) -> Result<Response, Error> {
+    /// Returns a response for every completed call. Response body transmission
+    /// occurs later under the serving connection's ownership.
+    pub async fn run(mut self, request: &mut Request) -> Response {
         if let Some((&id, remaining)) = self.chain.split_first() {
             self.chain = remaining;
             return self.middleware[id].call(request, self).await;
         }
         match self.terminal {
             Terminal::Controller(controller) => controller.call(request).await,
-            Terminal::Error(error) => Err(error),
+            Terminal::Response(response) => *response,
         }
     }
 }

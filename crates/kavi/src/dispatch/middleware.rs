@@ -1,74 +1,49 @@
 use std::ops::AsyncFn;
 
-use crate::{
-    Error,
-    http::{Request, Response},
-};
+use crate::http::{Request, Response};
 
 use super::{DispatchFuture, Next};
 
 /// Surrounds the remaining middleware and controller with before-and-after logic.
 ///
-/// The [`crate::middleware`] macro implements this trait with [`super::Provide`]
-/// bounds for its application dependency parameters. Call the generated factory
-/// when registering middleware, as in `router.middleware(authenticate())`.
-/// Routers check provider bounds at registration and bind middleware to the shared
-/// dependency owner when building the routing table. Application services remain
-/// outside the request.
-/// Shared references may remain borrowed across `.await`. An owned dependency
-/// marked `#[dependency(clone)]` clones the provided value per invocation, allowing
-/// that handle to outlive dispatch. The generated `call` method instead accepts
-/// the original explicit arguments and performs no projection or cloning.
+/// Middleware temporarily lends its mutable request borrow to [`Next::run`].
+/// After that await completes it can inspect the request again and modify the
+/// owned response. Returning without invoking Next short-circuits the chain.
+/// The continuation is consumed at most once and contains no request data.
 ///
-/// Call [`Next::run`] to transfer the owned request to the remainder at most once,
-/// or return directly to short-circuit. The continuation always includes a
-/// terminal controller or routing error. Async functions
-/// and reusable async closures automatically implement this trait for any `S` when they
-/// accept a [`Request`] and a [`Next`] and return
-/// [`Result<Response, Error>`], ignoring the supplied dependency root.
+/// The [`macro@crate::middleware`] macro binds application dependencies through
+/// [`super::Provide`]. Dependencies remain separate from the request. Borrowed
+/// dependencies can be used across await points; `#[dependency(clone)]` explicitly
+/// acquires an owned handle. Register the generated factory with the router or
+/// application builder.
 ///
-/// A middleware instance must own its captures or borrow them for `'static`.
-/// Each call's future may borrow the instance, dependency root, and continuation,
-/// including across downstream execution. Calls use `&self`,
-/// so an instance may serve interleaved requests; request-local data can be passed
-/// to downstream middleware and the controller through request extensions.
-/// Neither middleware nor its futures are required to be `Send` or `Sync`.
+/// Every completed call returns Response, including rejections and business
+/// failures. Handle fallible operations locally and choose the response there.
+/// Outer middleware receives responses for routing misses and framework checks as
+/// well. Returning a response does not mean its streaming body was transmitted.
+/// Code after the downstream await does not run if dispatch panics or is dropped.
 ///
-/// Code after `next.run(request).await` runs when the remainder returns a response
-/// or error, before a streaming response body has necessarily been sent. Using
-/// `next.run(request).await?` returns early on error, skipping subsequent code.
-/// Match the result to inspect or recover errors. Code after the await is not
-/// guaranteed to run if the dispatch future is dropped or panics.
-///
-/// Handwritten implementations receive the dependency root as the final argument.
-/// They can attach request-local data before invoking the continuation and modify
-/// response headers when it returns. They need no provider projections unless
-/// their implementation chooses to use them.
+/// Async functions and reusable async closures accepting `&mut Request` and Next
+/// implement this trait automatically. Instances own their captures or borrow
+/// them for `'static`; call futures may borrow the request and dependencies.
+/// Neither instances nor their futures need to be Send or Sync.
 #[allow(async_fn_in_trait)]
 pub trait Middleware<S = ()>: 'static {
-    /// Handles the owned request and may invoke the remainder once or return early.
-    ///
-    /// # Errors
-    ///
-    /// May return its own framework error or propagate one from [`Next::run`].
-    async fn handle(&self, request: Request, next: Next<'_>, dependencies: &S) -> Result<Response, Error>;
+    /// Borrows the request and invokes the remainder once or returns an early response.
+    async fn handle(&self, request: &mut Request, next: Next<'_>, dependencies: &S) -> Response;
 }
 
 impl<F, S> Middleware<S> for F
 where
-    F: for<'a> AsyncFn(Request, Next<'a>) -> Result<Response, Error> + 'static,
+    F: for<'r, 'n> AsyncFn(&'r mut Request, Next<'n>) -> Response + 'static,
 {
     #[inline]
-    async fn handle(&self, request: Request, next: Next<'_>, _: &S) -> Result<Response, Error> {
+    async fn handle(&self, request: &mut Request, next: Next<'_>, _: &S) -> Response {
         self(request, next).await
     }
 }
 
-/// Object-compatible middleware calls for heterogeneous routing storage.
-///
-/// Bound middleware retains its dependency owner and boxes each call's future,
-/// which may borrow the middleware, dependencies, and continuation without being
-/// `Send` or `'static`.
+/// Object-compatible middleware calls borrowing the request and bound owner.
 pub(crate) trait ErasedMiddleware {
-    fn call<'a>(&'a self, request: Request, next: Next<'a>) -> DispatchFuture<'a>;
+    fn call<'r>(&'r self, request: &'r mut Request, next: Next<'r>) -> DispatchFuture<'r>;
 }

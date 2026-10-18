@@ -1,28 +1,13 @@
 //! Streaming multipart form extraction and caller-owned upload destinations.
 //!
 //! Extract [`Multipart`] through [`super::RequestExt::extract_body`].
-//! [`MultipartLimits`] can be installed as middleware or in request extensions.
+//! Pass [`MultipartLimits`] to [`super::RequestExt::extract_body_with`] to configure
+//! field checks explicitly. Use [`crate::http::middleware::BodyLimit`] independently
+//! to enforce total payload bytes, including multipart framing.
 //! Failures remain typed as [`MultipartError`] and convert into [`crate::Error`].
 //!
-//! ```no_run
-//! use kavi::{Error, http::{Request, RequestExt, Response, multipart::Multipart}};
-//!
-//! async fn upload(mut request: Request) -> Result<Response, Error> {
-//!     let mut multipart = request.extract_body::<Multipart>().await?;
-//!     while let Some(mut field) = multipart.next_field().await? {
-//!         while let Some(bytes) = field.chunk().await? {
-//!             // Process each chunk without collecting the entire upload.
-//!         }
-//!     }
-//!     Ok(Response::default())
-//! }
-//! ```
 
-use crate::{
-    Error,
-    dispatch::{Middleware, Next},
-    http::{Body, Request, Response, extract::FromRequestBody},
-};
+use crate::http::{Body, Request, extract::FromRequestBody};
 use bytes::Bytes;
 
 mod error;
@@ -32,15 +17,17 @@ pub use error::MultipartError;
 
 /// Limits applied to multipart extraction, including skipped fields.
 ///
-/// Install this value as middleware or insert it in request extensions before
-/// extraction. Defaults are 2 MiB for parser-consumed body bytes, 2 MiB per field,
-/// and 128 fields. Preambles are limited to 32 KiB and field headers to 64 KiB
-/// and 32 headers; transport padding on a boundary is limited to 64 KiB. The parser stops at the closing delimiter without draining
-/// the remaining HTTP body; unread epilogue bytes are not counted.
+/// Keep these parser settings in application configuration and pass them directly
+/// to extraction. They do not implement middleware and are never installed in
+/// request extensions. Total payload enforcement belongs to
+/// [`crate::http::middleware::BodyLimit`]; without it there is no total payload ceiling.
+/// Defaults are 2 MiB per field and 128 fields.
+/// Preambles are limited to 32 KiB and field headers to 64 KiB and 32 headers;
+/// transport padding on a boundary is limited to 64 KiB. The parser stops at the
+/// closing delimiter without draining the remaining HTTP body; unread epilogue
+/// bytes are not counted.
 #[derive(Clone, Copy, Debug)]
 pub struct MultipartLimits {
-    /// Maximum body bytes read by the parser, including multipart framing.
-    pub body_bytes: usize,
     /// Maximum bytes in one field, including files.
     pub field_bytes: usize,
     /// Maximum number of fields, including empty fields.
@@ -51,18 +38,9 @@ impl Default for MultipartLimits {
     #[inline]
     fn default() -> Self {
         Self {
-            body_bytes: super::body::DEFAULT_BODY_LIMIT,
             field_bytes: super::body::DEFAULT_BODY_LIMIT,
             fields: 128,
         }
-    }
-}
-
-impl<S> Middleware<S> for MultipartLimits {
-    #[inline]
-    async fn handle(&self, mut request: Request, next: Next<'_>, _: &S) -> Result<Response, Error> {
-        request.extensions_mut().insert(*self);
-        next.run(request).await
     }
 }
 
@@ -84,26 +62,27 @@ pub struct Multipart {
     parser: parser::Multipart,
 }
 
-impl<'r, 's, S: ?Sized> FromRequestBody<'r, 's, S> for Multipart {
+impl<'r, 's> FromRequestBody<'r, 's> for Multipart {
     type Error = MultipartError;
 
-    async fn from_body(request: &'r Request, body: Body, _: &'s S) -> Result<Self, Self::Error> {
+    async fn from_body(request: &'r Request, body: Body, _: &'s ()) -> Result<Self, Self::Error> {
+        Self::from_body(request, body, &MultipartLimits::default()).await
+    }
+}
+
+impl<'r, 's> FromRequestBody<'r, 's, MultipartLimits> for Multipart {
+    type Error = MultipartError;
+
+    async fn from_body(request: &'r Request, body: Body, limits: &'s MultipartLimits) -> Result<Self, Self::Error> {
         let content_type = request
             .headers()
             .get(http::header::CONTENT_TYPE)
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
         let boundary = parser::parse_boundary(content_type)?;
-        let limits = request
-            .extensions()
-            .get::<MultipartLimits>()
-            .copied()
-            .unwrap_or_default();
-        let constraints = parser::Constraints::new().field_count(limits.fields).size_limit(
-            parser::SizeLimit::new()
-                .whole_stream(limits.body_bytes as u64)
-                .per_field(limits.field_bytes as u64),
-        );
+        let constraints = parser::Constraints::new()
+            .field_count(limits.fields)
+            .size_limit(parser::SizeLimit::new().per_field(limits.field_bytes as u64));
 
         Ok(Self {
             parser: parser::Multipart::with_constraints(body, boundary, constraints),
@@ -163,7 +142,7 @@ impl Field<'_> {
         self.field.chunk().await
     }
 
-    /// Collects a field within the configured field and total limits.
+    /// Collects a field within its parser limit and any enforced payload ceiling.
     ///
     /// # Errors
     ///

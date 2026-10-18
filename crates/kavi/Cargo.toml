@@ -18,6 +18,10 @@ keywords = ["web", "framework", "fullstack", "async", "orm"]
 rust-version.workspace = true
 edition.workspace = true
 
+[features]
+default = []
+cookies = ["dep:biscotti"]
+
 [dependencies]
 # Core dependencies
 kavi-macros = { version = "0.1.0", path = "../kavi-macros" }
@@ -29,7 +33,7 @@ serde_json = { version = "1" }
 memchr = { version = "2" }
 
 # HTTP dependencies
-biscotti = { version = "0.4.3" }
+biscotti = { version = "0.4.3", optional = true }
 bytes = { version = "1.12.1" }
 encoding_rs = { version = "0.8" }
 http = { version = "1.5.0" }

@@ -14,6 +14,7 @@ mod limits;
 mod proxy;
 mod request_id;
 mod rewrite;
+mod secure_headers;
 mod timeout;
 
 pub use crate::http::body::BodyLimitExceeded;
@@ -24,4 +25,7 @@ pub use limits::{BodyLimit, ConcurrencyLimit};
 pub use proxy::TrustedProxies;
 pub use request_id::RequestId;
 pub use rewrite::{MethodOverride, NormalizePath};
+pub use secure_headers::{
+    ContentTypeOptions, FrameOptions, ReferrerPolicy, SecureHeaders, SecureHeadersBuilder, SecurityHeadersConfigError,
+};
 pub use timeout::{RequestTimedOut, RequestTimeout};

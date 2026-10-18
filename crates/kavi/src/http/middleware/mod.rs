@@ -9,6 +9,7 @@
 
 #[cfg(feature = "cookies")]
 mod cookies;
+mod cors;
 mod limits;
 mod proxy;
 mod request_id;
@@ -18,6 +19,7 @@ mod timeout;
 pub use crate::http::body::BodyLimitExceeded;
 #[cfg(feature = "cookies")]
 pub use cookies::CookieMiddleware;
+pub use cors::{Cors, CorsBuilder, CorsConfigError};
 pub use limits::{BodyLimit, ConcurrencyLimit};
 pub use proxy::TrustedProxies;
 pub use request_id::RequestId;

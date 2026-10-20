@@ -255,7 +255,11 @@ impl From<QueryError> for Error {
 impl From<CookieError> for Error {
     #[inline]
     fn from(source: CookieError) -> Self {
-        Self::with_status(StatusCode::BAD_REQUEST, source)
+        let status = match &source {
+            CookieError::Disabled => StatusCode::INTERNAL_SERVER_ERROR,
+            CookieError::Header(_) | CookieError::Parse(_) => StatusCode::BAD_REQUEST,
+        };
+        Self::with_status(status, source)
     }
 }
 

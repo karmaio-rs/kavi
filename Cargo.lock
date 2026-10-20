@@ -61,9 +61,9 @@ checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
 
 [[package]]
 name = "biscotti"
-version = "0.4.3"
+version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ddb6f28a3d15d18cace7a8010282a4d9cee1452dcd33f5861c173b4a31095b79"
+checksum = "7abc6e5e6c37016d7211ed0233d571617c0a8870be06f240468bbf28e64fcc77"
 dependencies = [
  "aes-gcm-siv",
  "anyhow",

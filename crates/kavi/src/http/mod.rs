@@ -3,9 +3,10 @@
 //! [`Request`] and [`Response`] use Kavi's canonical [`Body`]. Import
 //! [`RequestExt`] alongside [`Request`] to access metadata and run extractors.
 //! [`extract`] contains extractor traits, values, and their typed errors;
-//! [`response`] contains helpers for constructing responses. The optional
-//! `cookies` feature provides Biscotti cookie helpers and `ResponseExt` for
-//! queued or immediate response cookies. Streaming messages use [`Body`].
+//! [`response`] contains helpers for constructing responses. Streaming messages
+//! use [`Body`]. With the `cookies` feature, request cookies are read and
+//! response cookies are queued; register `middleware::CookieMiddleware` so a
+//! dependency root that provides the cookie processor emits that queue.
 //! [`multipart`] provides streaming form uploads with typed errors and limits.
 //! [`middleware`] provides built-in HTTP request and response policies.
 //! Extractors accept explicit service contexts and can return borrowed metadata
@@ -48,5 +49,3 @@ pub use body::{Body, BodyData};
 pub use metadata::MetadataError;
 pub(crate) use metadata::{RequestMetadata, apply_forwarded};
 pub use request::{ConnectionInfo, RequestExt, RoutingInfo};
-#[cfg(feature = "cookies")]
-pub use response::ResponseExt;

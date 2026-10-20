@@ -349,7 +349,7 @@ impl<'r, 's, T: ?Sized, S: Provide<T> + ?Sized> FromRequestHead<'r, 's, S> for D
 /// while borrowing the request immutably and preserving the body.
 ///
 /// Built-in implementations include [`Query`], [`Path`], [`RawHeaders`], and [`Dependency`].
-/// With the `cookies` feature, read borrowed cookies through `RequestExt::cookies`.
+/// With the `cookies` feature, cookie jars are also available as head extractors.
 /// JSON extraction consumes the body instead.
 /// See [`FromRequestBody`] for body-consuming extractors.
 ///

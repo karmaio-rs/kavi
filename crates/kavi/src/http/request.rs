@@ -14,7 +14,7 @@ use super::{
 };
 
 #[cfg(feature = "cookies")]
-use super::cookies::{self, CookieError, RequestCookies};
+use super::cookies::{CookieError, CookieJar, Processor};
 
 /// Transport-level connection metadata.
 ///
@@ -185,20 +185,20 @@ pub trait RequestExt {
     /// Returns [`QueryError`] when deserialization fails.
     fn query<T: DeserializeOwned>(&self) -> Result<T, QueryError>;
 
-    /// Parses incoming cookies using the supplied application processor.
+    /// Returns a cookie jar for this request.
     ///
-    /// The collection borrows the request headers where possible and preserves
-    /// duplicate names. Cookie processing is application configuration: keep the
-    /// configured [`cookies::Processor`] in the dependency root and pass it here.
-    /// Outgoing cookies can be queued for CookieMiddleware or appended immediately
-    /// with ResponseExt::set_cookie using the same processor.
+    /// Pass the application [`Processor`]. The jar copies the `Cookie` header,
+    /// parses incoming cookies when read, and queues response cookies for
+    /// [`crate::http::middleware::CookieMiddleware`] to emit. A dependency root
+    /// that provides [`Processor`] can supply the same jar through
+    /// [`Self::extract_head_with`]. Body extraction can run while the jar is open.
     /// Available with the `cookies` feature.
     ///
     /// # Errors
-    /// Returns [`CookieError`] when a header is unreadable or cookie parsing,
-    /// decoding, or cryptographic processing fails.
+    /// Returns [`CookieError::Disabled`] when cookie middleware did not mark
+    /// this request. Header and parse failures are returned by the jar's reads.
     #[cfg(feature = "cookies")]
-    fn cookies(&self, processor: &cookies::Processor) -> Result<RequestCookies<'_>, CookieError>;
+    fn cookies<'processor>(&self, processor: &'processor Processor) -> Result<CookieJar<'processor>, CookieError>;
 
     /// Runs an asynchronous metadata extractor.
     ///
@@ -351,8 +351,8 @@ impl RequestExt for Request {
 
     #[cfg(feature = "cookies")]
     #[inline]
-    fn cookies(&self, processor: &cookies::Processor) -> Result<RequestCookies<'_>, CookieError> {
-        cookies::from_headers(self, processor)
+    fn cookies<'processor>(&self, processor: &'processor Processor) -> Result<CookieJar<'processor>, CookieError> {
+        CookieJar::open(self, processor)
     }
 
     #[inline]

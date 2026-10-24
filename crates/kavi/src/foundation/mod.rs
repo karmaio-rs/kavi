@@ -5,4 +5,4 @@ mod error;
 pub mod server;
 
 pub use application::{Application, ApplicationBuilder};
-pub use error::Error;
+pub use error::{DefaultErrorHandler, Error, ErrorHandler, PanicError};

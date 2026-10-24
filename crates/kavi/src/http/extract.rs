@@ -39,7 +39,7 @@ use super::{
 /// The body is collected and deserialized into `T`.
 /// Pass [`BufferedBodyLimit`] to explicit-context extraction to configure the
 /// collection budget; unit context uses 2 MiB.
-/// Use [`crate::http::response::json`] to build a JSON response.
+/// Use [`crate::http::response::JsonResponse`] to return JSON from a controller.
 ///
 /// # Errors
 ///

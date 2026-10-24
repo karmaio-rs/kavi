@@ -7,7 +7,7 @@ use syn::{
     visit::{self, Visit},
 };
 
-use crate::{attributes, generics};
+use crate::{attributes, generics, return_type};
 
 #[derive(Clone, Copy)]
 pub(super) enum Kind {
@@ -18,6 +18,8 @@ pub(super) enum Kind {
 pub(super) fn expand(args: TokenStream, mut function: ItemFn, kind: Kind) -> syn::Result<TokenStream> {
     let path = attributes::crate_path(args)?;
     let signature = &function.sig;
+    // The author's own return type, kept for the nested invocation.
+    let author_output = signature.output.clone();
     if signature.asyncness.is_none() {
         return Err(syn::Error::new_spanned(signature, "handler functions must be async"));
     }
@@ -126,6 +128,12 @@ pub(super) fn expand(args: TokenStream, mut function: ItemFn, kind: Kind) -> syn
     let invoke_name = names.fresh(&format!("__kavi_f{encoded_name}_call"));
     let adapter = names.fresh(&format!("__KaviHandlerF{encoded_name}"));
     let (retained, call_generics) = generics::split(&signature.generics)?;
+    let type_parameters: Vec<syn::Ident> = retained
+        .type_params()
+        .map(|parameter| parameter.ident.clone())
+        .collect();
+    let parameter_names: Vec<String> = type_parameters.iter().map(|parameter| parameter.to_string()).collect();
+    let response_type = return_type::bound(&signature.output, &parameter_names);
     let mut requirements = Vec::new();
     let mut arguments = Vec::new();
     for (index, argument) in signature.inputs.iter().enumerate() {
@@ -190,6 +198,19 @@ pub(super) fn expand(args: TokenStream, mut function: ItemFn, kind: Kind) -> syn
             .attrs
             .retain(|attribute| !attribute.path().is_ident("dependency"));
     }
+    let (handler_trait, continuation, call_continuation) = match kind {
+        Kind::Controller => (quote!(Controller), quote!(), quote!()),
+        Kind::Middleware => (
+            quote!(Middleware),
+            quote!(#next: #path::dispatch::Next<'_>,),
+            quote!(#next,),
+        ),
+    };
+    // Both kinds produce a response, so the conversion and the output type are
+    // the same.
+    let output_type = quote!(#path::http::Response);
+    let conversion = quote!(#path::http::IntoResponse::into_response);
+
     let mut call = function.sig.clone();
     call.ident = parse_quote!(call);
     call.generics = call_generics;
@@ -205,12 +226,12 @@ pub(super) fn expand(args: TokenStream, mut function: ItemFn, kind: Kind) -> syn
     call.inputs.insert(0, parse_quote!(&self));
     let mut invoke = call.clone();
     invoke.ident = invoke_name.clone();
+    // The nested function keeps the author's own return type; the conversion
+    // happens at the call sites.
+    invoke.output = author_output;
+    call.output = parse_quote!(-> #output_type);
     function.vis = syn::Visibility::Inherited;
 
-    let type_parameters = retained
-        .type_params()
-        .map(|parameter| &parameter.ident)
-        .collect::<Vec<_>>();
     let forwarded = retained
         .params
         .iter()
@@ -221,7 +242,7 @@ pub(super) fn expand(args: TokenStream, mut function: ItemFn, kind: Kind) -> syn
         })
         .collect::<Vec<_>>();
     let turbofish = (!forwarded.is_empty()).then(|| quote!(::<#(#forwarded),*>));
-    let (impl_generics, type_generics, where_clause) = retained.split_for_impl();
+    let (_impl_generics, type_generics, where_clause) = retained.split_for_impl();
     let mut bound_generics = retained.clone();
     bound_generics.params.push(parse_quote!(#state));
     for parameter in &type_parameters {
@@ -236,16 +257,24 @@ pub(super) fn expand(args: TokenStream, mut function: ItemFn, kind: Kind) -> syn
             .predicates
             .push(syn::parse2(requirement)?);
     }
+    if let Some(ty) = &response_type {
+        bound_generics
+            .make_where_clause()
+            .predicates
+            .push(parse_quote!(#ty: #path::http::IntoResponse));
+    }
     let (bound_impl_generics, _, bound_where_clause) = bound_generics.split_for_impl();
 
-    let (handler_trait, continuation, call_continuation) = match kind {
-        Kind::Controller => (quote!(Controller), quote!(), quote!()),
-        Kind::Middleware => (
-            quote!(Middleware),
-            quote!(#next: #path::dispatch::Next<'_>,),
-            quote!(#next,),
-        ),
-    };
+    // The direct-call method performs the same conversion, so it needs the
+    // same bounds even though it does not need the dependency provider.
+    let mut call_generics = retained.clone();
+    if let Some(ty) = &response_type {
+        call_generics
+            .make_where_clause()
+            .predicates
+            .push(parse_quote!(#ty: #path::http::IntoResponse));
+    }
+    let (call_impl_generics, _, call_where_clause) = call_generics.split_for_impl();
 
     Ok(quote! {
         #(#configuration)*
@@ -265,11 +294,11 @@ pub(super) fn expand(args: TokenStream, mut function: ItemFn, kind: Kind) -> syn
         }
 
         #(#configuration)*
-        impl #impl_generics #adapter #type_generics #where_clause {
+        impl #call_impl_generics #adapter #type_generics #call_where_clause {
             #(#lint_attributes)*
             #(#public_attributes)*
             #visibility #call {
-                self.#invoke_name(#(#parameters),*).await
+                #conversion(self.#invoke_name(#(#parameters),*).await)
             }
 
             #invoke {
@@ -290,8 +319,8 @@ pub(super) fn expand(args: TokenStream, mut function: ItemFn, kind: Kind) -> syn
                 #request: &mut #path::http::Request,
                 #continuation
                 #dependencies: &#state,
-            ) -> #path::http::Response {
-                self.#invoke_name(#request, #call_continuation #(#arguments),*).await
+            ) -> #output_type {
+                #conversion(self.#invoke_name(#request, #call_continuation #(#arguments),*).await)
             }
         }
     })

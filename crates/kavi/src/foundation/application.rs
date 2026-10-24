@@ -1,7 +1,14 @@
-use std::rc::Rc;
+use std::{
+    any::Any,
+    future::{Future, poll_fn},
+    panic::{AssertUnwindSafe, catch_unwind},
+    pin::pin,
+    rc::Rc,
+    task::Poll,
+};
 
 use crate::{
-    Error,
+    DefaultErrorHandler, Error, ErrorHandler, PanicError,
     dispatch::{
         DispatchFuture, ErasedController, ErasedMiddleware, Middleware, MiddlewareFactory, Next, Terminal,
         defer_middleware,
@@ -10,7 +17,6 @@ use crate::{
         Body, HeaderValue, Method, Request, RequestMetadata, Response, RoutingInfo, StatusCode,
         body::{HttpBody, SizeHint, TrailerHint},
         header,
-        response::empty,
     },
     routing::{BuildError, RecognitionError, Router, RoutingTable},
 };
@@ -19,14 +25,16 @@ use crate::{
 ///
 /// The application owns each request and lends mutable references through the
 /// middleware and controller chain. Every completed call returns an owned
-/// response. Business errors are handled in handlers. Framework rejections are
-/// converted to responses before returning through middleware. Original HEAD
-/// finalization occurs after all middleware returns.
+/// response. Handler results are converted at their boundary, so returned
+/// application errors do not reach the panic hook. Framework rejections are converted to responses before
+/// returning through middleware. A panic is contained and rendered as a generic
+/// 500. Original HEAD finalization occurs after all middleware returns.
 /// Calls can overlap on a worker. The application never spawns tasks.
 pub struct Application {
     router: RoutingTable,
     middleware: Vec<Box<dyn ErasedMiddleware>>,
     chain: Vec<usize>,
+    errors: Rc<dyn ErrorHandler>,
 }
 
 /// Binds routes and application middleware to the same typed dependency owner.
@@ -37,6 +45,7 @@ pub struct Application {
 pub struct ApplicationBuilder<S = ()> {
     router: Router<S>,
     middleware: Vec<MiddlewareFactory<S>>,
+    errors: Rc<dyn ErrorHandler>,
 }
 
 /// Representation hints retained for encoding a payload-free HEAD response.
@@ -52,6 +61,7 @@ impl Application {
         ApplicationBuilder {
             router,
             middleware: Vec::new(),
+            errors: Rc::new(DefaultErrorHandler),
         }
     }
 
@@ -64,9 +74,18 @@ impl Application {
     ///
     /// Application middleware also surrounds metadata-validation failures. Such
     /// failures produce an early response instead of entering routing. Middleware
-    /// may inspect and modify that response normally. Panics and dropped futures
-    /// are not converted to responses. Late response-body failures belong to the
-    /// serving connection.
+    /// may inspect and modify that response normally.
+    ///
+    /// A panic from any middleware or controller is contained here. It is
+    /// reported and rendered by [`ErrorHandler`], producing a generic 500, so a
+    /// single request cannot take the worker task down. A panic in the serving
+    /// connection, before or after this call, is outside this boundary. Late
+    /// response-body failures belong to the serving connection as well.
+    ///
+    /// The panic unwinds every frame between the defect and this boundary, so
+    /// middleware that was awaiting downstream does not resume and cannot
+    /// decorate the rendered response. Brand the 500 in
+    /// [`ErrorHandler::render`] instead.
     pub async fn handle(&self, mut request: Request) -> Response {
         request.extensions_mut().remove::<RoutingInfo>();
         let head = request.method() == Method::HEAD;
@@ -75,9 +94,15 @@ impl Application {
             Ok(()) => Terminal::Controller(&routing),
             Err(error) => Terminal::Response(Box::new(Error::from(error).into_response())),
         };
-        let mut response = Next::new(&self.middleware, &self.chain, terminal)
-            .run(&mut request)
-            .await;
+        let outcome = catch_panic(Next::new(&self.middleware, &self.chain, terminal).run(&mut request)).await;
+        let mut response = match outcome {
+            Ok(response) => response,
+            Err(payload) => {
+                let error = Error::internal(PanicError::from_payload(&*payload));
+                self.errors.report(&error, &request);
+                self.errors.render(&error, &request)
+            }
+        };
         if head {
             let status = response.status();
             if !status.is_informational()
@@ -127,19 +152,26 @@ impl Application {
     }
 }
 
+/// Catches an unwinding panic from each poll without extra bounds on the future.
+///
+/// Local pinning supports non-Unpin futures without allocation or unsafe projection.
+/// After a panic, the future is dropped and is never polled again.
+async fn catch_panic<F: Future>(future: F) -> Result<F::Output, Box<dyn Any + Send>> {
+    let mut future = pin!(future);
+    poll_fn(|cx| match catch_unwind(AssertUnwindSafe(|| future.as_mut().poll(cx))) {
+        Ok(Poll::Ready(value)) => Poll::Ready(Ok(value)),
+        Ok(Poll::Pending) => Poll::Pending,
+        Err(payload) => Poll::Ready(Err(payload)),
+    })
+    .await
+}
+
+/// Converts a route-recognition failure into a framework response.
 fn routing_response(error: RecognitionError) -> Response {
     match error {
         RecognitionError::InvalidCapture(error) => Error::with_status(StatusCode::BAD_REQUEST, error).into_response(),
-        RecognitionError::NotFound => empty(StatusCode::NOT_FOUND),
-        RecognitionError::MethodNotAllowed(allowed) => {
-            let mut response = empty(StatusCode::METHOD_NOT_ALLOWED);
-            let methods = allowed.iter().map(Method::as_str).collect::<Vec<_>>().join(", ");
-            response.headers_mut().insert(
-                header::ALLOW,
-                HeaderValue::try_from(methods).expect("HTTP methods are valid header tokens"),
-            );
-            response
-        }
+        RecognitionError::NotFound => Error::not_found().into_response(),
+        RecognitionError::MethodNotAllowed(allowed) => Error::method_not_allowed(allowed).into_response(),
     }
 }
 
@@ -177,6 +209,18 @@ impl<S: 'static> ApplicationBuilder<S> {
         self
     }
 
+    /// Replaces the handler that reports and renders a panic.
+    ///
+    /// Returned handler errors use their own response conversion and never
+    /// reach this handler. It only observes caught panics, which are rendered
+    /// as a generic 500 by default.
+    ///
+    /// The default handler reports nothing and renders the standard JSON body.
+    pub fn error_handler(mut self, handler: impl ErrorHandler + 'static) -> Self {
+        self.errors = Rc::new(handler);
+        self
+    }
+
     /// Compiles routes and binds every handler to the same application dependency root.
     ///
     /// # Errors
@@ -192,6 +236,7 @@ impl<S: 'static> ApplicationBuilder<S> {
             chain: (0..middleware.len()).collect(),
             router,
             middleware,
+            errors: self.errors,
         })
     }
 }

@@ -19,7 +19,7 @@ pub struct Next<'a> {
 
 pub(crate) enum Terminal<'a> {
     Controller(&'a dyn ErasedController),
-    // Framework rejection responses are cold; keep normal continuations compact.
+    /// A framework rejection, such as an unmatched path or a disallowed method.
     Response(Box<Response>),
 }
 
@@ -34,7 +34,9 @@ impl<'a> Next<'a> {
 
     /// Executes the remainder once with a temporary mutable request borrow.
     ///
-    /// Returns a response for every completed call. Response body transmission
+    /// Returns a response for every completed call. A controller always
+    /// produces one after converting its selected result branch, and a framework
+    /// rejection is already a response. Response body transmission
     /// occurs later under the serving connection's ownership.
     pub async fn run(mut self, request: &mut Request) -> Response {
         if let Some((&id, remaining)) = self.chain.split_first() {

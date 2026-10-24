@@ -3,13 +3,12 @@ use std::{net::Ipv6Addr, time::Duration};
 use crate::{
     dispatch::{Middleware, Next},
     http::{
-        HeaderMap, HeaderName, HeaderValue, Method, Request, RequestMetadata, Response, StatusCode,
+        HeaderMap, HeaderName, HeaderValue, IntoResponse, Method, Request, RequestMetadata, Response, StatusCode,
         header::{
             ACCESS_CONTROL_ALLOW_CREDENTIALS, ACCESS_CONTROL_ALLOW_HEADERS, ACCESS_CONTROL_ALLOW_METHODS,
             ACCESS_CONTROL_ALLOW_ORIGIN, ACCESS_CONTROL_EXPOSE_HEADERS, ACCESS_CONTROL_MAX_AGE,
             ACCESS_CONTROL_REQUEST_HEADERS, ACCESS_CONTROL_REQUEST_METHOD, ORIGIN, VARY,
         },
-        response::empty,
     },
 };
 
@@ -288,16 +287,16 @@ impl<S> Middleware<S> for Cors {
             (next.run(request).await, allowed_origin, false)
         } else {
             match &parsed {
-                Err(()) => (empty(StatusCode::BAD_REQUEST), None, false),
+                Err(()) => (StatusCode::BAD_REQUEST.into_response(), None, false),
                 Ok(parsed) => {
                     if let Some(method) = &parsed.method {
                         if allowed_origin.is_some()
                             && self.methods.contains(method)
                             && parsed.headers.iter().all(|name| self.headers.contains(name))
                         {
-                            (empty(StatusCode::NO_CONTENT), allowed_origin, true)
+                            (StatusCode::NO_CONTENT.into_response(), allowed_origin, true)
                         } else {
-                            (empty(StatusCode::FORBIDDEN), None, false)
+                            (StatusCode::FORBIDDEN.into_response(), None, false)
                         }
                     } else {
                         (next.run(request).await, allowed_origin, false)

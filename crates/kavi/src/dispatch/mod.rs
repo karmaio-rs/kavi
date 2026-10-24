@@ -1,9 +1,15 @@
-//! Response-only controllers and middleware borrowing application-owned requests.
+//! Controllers and middleware borrowing application-owned requests.
 //!
-//! A Controller handles `&mut Request` and returns an owned Response. Middleware
-//! can modify the request before lending it to [`Next::run`], then inspect the
-//! request and response afterward. Early responses skip the remaining chain.
-//! Business and extraction errors are handled inside the controller or middleware.
+//! A Controller handles `&mut Request` and returns a concrete response. Handler
+//! adapters accept any response-convertible value, including `Result<T, E>` when
+//! both branches implement [`crate::http::IntoResponse`]. They convert the selected
+//! branch before returning to middleware; an application error keeps its own
+//! response representation.
+//!
+//! Middleware can modify the request before lending it to [`Next::run`], then
+//! inspect the request and concrete response afterward. Early responses skip the
+//! remaining chain. Returned errors do not reach the panic hook; a panic is
+//! contained separately by [`crate::Application`] and rendered as a generic 500.
 //!
 //! Request data remains on the request; Next stores only the remaining call
 //! structure. Typed application dependencies are bound separately through Provide.

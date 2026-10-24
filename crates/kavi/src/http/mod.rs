@@ -3,12 +3,16 @@
 //! [`Request`] and [`Response`] use Kavi's canonical [`Body`]. Import
 //! [`RequestExt`] alongside [`Request`] to access metadata and run extractors.
 //! [`extract`] contains extractor traits, values, and their typed errors;
-//! [`response`] contains helpers for constructing responses. Streaming messages
+//! [`response`] contains response types implementing [`IntoResponse`]. Streaming messages
 //! use [`Body`]. With the `cookies` feature, request cookies are read and
 //! response cookies are queued; register `middleware::CookieMiddleware` so a
 //! dependency root that provides the cookie processor emits that queue.
 //! [`multipart`] provides streaming form uploads with typed errors and limits.
 //! [`middleware`] provides built-in HTTP request and response policies.
+//!
+//! [`IntoResponse`] converts a value into a response so a controller can
+//! return a string, a status, or a JSON value.
+//!
 //! Extractors accept explicit service contexts and can return borrowed metadata
 //! or services. [`Request`] remains the standard HTTP request alias. Its extensions
 //! store compatible metadata; a separate store for worker-local request resources
@@ -46,6 +50,8 @@ pub use http::response::{Builder as ResponseBuilder, Parts as ResponseParts};
 
 pub use crate::routing::RouteParams;
 pub use body::{Body, BodyData};
+pub use extract::Json;
 pub use metadata::MetadataError;
 pub(crate) use metadata::{RequestMetadata, apply_forwarded};
 pub use request::{ConnectionInfo, RequestExt, RoutingInfo};
+pub use response::{IntoResponse, NoContent, Redirect};

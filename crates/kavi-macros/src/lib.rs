@@ -9,6 +9,7 @@ mod attributes;
 mod dependencies;
 mod generics;
 mod handler;
+mod return_type;
 mod typed_path;
 
 /// Exposes a struct's fields as borrowed application dependencies by exact type.
@@ -41,16 +42,23 @@ pub fn derive_dependencies(input: TokenStream) -> TokenStream {
 /// shared references to application dependencies, or owned dependencies annotated
 /// with `#[dependency(clone)]`. Each owned binding requires `Clone` and clones the
 /// provided value once per invocation. Mutable dependency references and cloning
-/// borrowed parameters are rejected. The function must return Kavi's Response
-/// directly, handling business and extraction errors locally. The original name
-/// becomes a zero-argument factory returning a zero-sized controller: register it
-/// with `router.get(path, show())`. The returned controller's `call` method accepts the original arguments
-/// for direct invocation as `show().call(request, &service).await`. Calling the
-/// factory does not execute the handler or allocate. Application dependencies are
-/// checked at registration and never stored in the request.
+/// borrowed parameters are rejected. The function must return a response or a
+/// value implementing `IntoResponse`, including `Result<T, E>` when both branches
+/// implement it. The
+/// original name becomes a zero-argument factory returning a zero-sized controller:
+/// register it with `router.get(path, show())`. The returned controller's `call`
+/// method accepts the original arguments for direct invocation as
+/// `show().call(request, &service).await`. Calling the factory does not execute
+/// the handler or allocate. Application dependencies are checked at registration
+/// and never stored in the request.
 /// Direct `call` invocations receive dependencies from the caller and do not
 /// project or clone them. The adapter's generated type name is an implementation
 /// detail; use the factory rather than naming or constructing that type.
+///
+/// A returned response may be any value that converts into one, such as a
+/// `String`, a `StatusCode`, or a `response::JsonResponse` value. A returned
+/// `Result<T, E>` converts the selected branch before returning to middleware,
+/// allowing `?` with a response-convertible error type.
 ///
 /// Type and const parameters belong to the factory and adapter; select them with
 /// the factory's turbofish when they cannot be inferred. Borrow lifetimes belong

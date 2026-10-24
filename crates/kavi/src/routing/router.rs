@@ -1,7 +1,7 @@
 use std::{collections::HashMap, panic::Location, rc::Rc};
 
 use super::{
-    BuildError, Group, Pattern, Route, RouteInfo, RoutingTable, TypedPath,
+    BuildError, Group, Pattern, Resource, ResourceRoutes, Route, RouteInfo, RoutingTable, TypedPath,
     matcher::{Candidate, InsertError, Matcher, MatcherBuilder},
     route::{DeclarationPattern, RouteDeclaration},
     table::Endpoint,
@@ -14,7 +14,7 @@ use crate::{
     http::Method,
 };
 
-/// Collects routes, groups, and a root fallback for validation at startup.
+/// Collects routes, resources, groups, and a root fallback for validation at startup.
 ///
 /// Method registration returns a [`Route`] handle for naming and middleware.
 /// Groups inherit path and name prefixes and middleware. Merged routers retain
@@ -59,6 +59,7 @@ impl<S> Default for Scope<S> {
 enum Declaration<S> {
     Route(RouteDeclaration<S>),
     Group(Group, Scope<S>, &'static Location<'static>),
+    Resource(Resource, Scope<S>, &'static Location<'static>),
     Merge(Scope<S>),
     Fallback(ControllerFactory<S>, &'static Location<'static>),
 }
@@ -182,6 +183,24 @@ impl<S: 'static> Router<S> {
         self.scope
             .declarations
             .push(Declaration::Group(group, router.scope, Location::caller()));
+        self
+    }
+
+    /// Registers selected resource actions in their own scope.
+    ///
+    /// The closure runs immediately. Actions become ordinary named routes with
+    /// inherited group prefixes, constraints, and middleware. Only supplied
+    /// handlers are registered. Resource middleware covers selected actions,
+    /// including implicit HEAD, without wrapping misses or routing errors.
+    /// Configuration and route conflicts are validated when the router is built.
+    /// Each action's registration location is preserved for diagnostics.
+    #[track_caller]
+    pub fn resource(&mut self, resource: Resource, configure: impl FnOnce(&mut ResourceRoutes<'_, S>)) -> &mut Self {
+        let mut router = Self::new();
+        configure(&mut ResourceRoutes::from_router(&mut router, &resource));
+        self.scope
+            .declarations
+            .push(Declaration::Resource(resource, router.scope, Location::caller()));
         self
     }
 
@@ -418,6 +437,17 @@ impl Compiler {
                         &name_prefix,
                         &chain,
                         false,
+                        dependencies,
+                    )?;
+                }
+                Declaration::Resource(resource, scope, location) => {
+                    let group = resource.into_group(location)?;
+                    self.compile(
+                        vec![Declaration::Group(group, scope, location)],
+                        prefix,
+                        name_prefix,
+                        inherited,
+                        root,
                         dependencies,
                     )?;
                 }

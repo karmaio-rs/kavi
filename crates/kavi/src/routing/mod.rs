@@ -35,11 +35,16 @@
 //! [`RoutingTable::url_for`], or generate independently with [`Pattern`] and
 //! typed values. Typed prefixes are concrete, explicit paths.
 //!
+//! [`Router::resource`] expands selected [`Resource`] actions into ordinary routes.
+//! [`ResourceRoutes`] retains per-action configuration through
+//! the same [`Route`] handles, dependency checks, and middleware contracts.
+//!
 mod error;
 mod group;
 mod matcher;
 mod params;
 mod pattern;
+mod resource;
 mod route;
 mod router;
 mod table;
@@ -51,6 +56,7 @@ pub use kavi_macros::TypedPath;
 pub(crate) use params::Param;
 pub use params::RouteParams;
 pub use pattern::{Pattern, PatternError};
+pub use resource::{Resource, ResourceRoutes};
 pub use route::{Route, RouteInfo};
 pub use router::Router;
 pub(crate) use table::RecognitionError;

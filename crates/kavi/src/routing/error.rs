@@ -41,6 +41,9 @@ pub enum BuildError {
         path: String,
         location: &'static Location<'static>,
     },
+    /// A resource has no name to qualify its generated action names.
+    #[error("empty resource name at {location}")]
+    EmptyResourceName { location: &'static Location<'static> },
     /// A qualified name identifies more than one declaration.
     #[error("duplicate route name {name:?} at {second}, previously registered at {first}")]
     DuplicateName {

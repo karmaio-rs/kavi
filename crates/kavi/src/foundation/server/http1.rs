@@ -1,8 +1,11 @@
 use std::{convert::Infallible, future::Future, rc::Rc};
 
-use karmaio::{io::IntoOwnedSplit, net::tcp::TcpStream};
+use karmaio::{
+    io::IntoOwnedSplit,
+    net::tcp::{TcpListener, TcpStream},
+};
 
-use super::{ConnectionControl, ConnectionError, ConnectionOutcome};
+use super::{ConnectionControl, ConnectionError, ConnectionOutcome, Serve};
 use crate::foundation::application::HeadRepresentation;
 use crate::{
     Application,
@@ -17,8 +20,9 @@ use crate::{
 /// Deploy behind a reverse proxy that owns public connections, TLS termination,
 /// and client-facing protocol negotiation.
 ///
-/// The caller supplies accepted I/O and drives the returned connection. No socket
-/// is bound and no task is spawned. Requests with unread bodies are abandoned
+/// The caller can supply accepted I/O and drive individual connections, or use
+/// [`Self::serve`] to supervise an already-bound listener. No socket is bound and
+/// no runtime is created. Requests with unread bodies are abandoned
 /// safely using Vakya's close policy; this server never performs an unbounded
 /// drain to preserve keep-alive. Protocol errors and late body/write errors are
 /// connection results. Application dispatch always returns a Response.
@@ -36,8 +40,8 @@ pub struct Http1Server {
 /// it does not guarantee asynchronous handler cleanup or application I/O settlement.
 #[must_use = "drive the connection or register it with Connections"]
 pub struct Connection<F> {
-    future: F,
-    control: ConnectionControl,
+    pub(super) future: F,
+    pub(super) control: ConnectionControl,
 }
 
 impl<F: Future> Connection<F> {
@@ -56,6 +60,17 @@ impl Http1Server {
     /// Creates an HTTP/1 server using Vakya's protocol defaults.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Configures bounded TCP serving on the caller's Karmaio runtime.
+    ///
+    /// Accepts an owned application or an existing worker-local `Rc<Application>`.
+    /// The runner shares the application with its connection tasks internally.
+    /// It owns the supplied listener and application handle and does
+    /// nothing until [`Serve::run_until`] is awaited. Protocol configuration is
+    /// copied from this server; subsequent changes do not affect the runner.
+    pub fn serve(&self, listener: TcpListener, application: impl Into<Rc<Application>>) -> Serve {
+        Serve::new(self.clone(), listener, application.into())
     }
 
     /// Configures head/body framing limits, buffering, and progress deadlines.
@@ -115,14 +130,30 @@ impl Http1Server {
             local_addr: io.local_addr()?,
             scheme: crate::http::uri::Scheme::HTTP,
         };
+        Ok(self.tcp_with_info(io, info, application))
+    }
+
+    // The listener runner reads metadata before transferring ownership so it
+    // can explicitly close an accepted socket if metadata lookup fails.
+    pub(super) fn tcp_with_info(
+        &self,
+        io: TcpStream,
+        info: ConnectionInfo,
+        application: Rc<Application>,
+    ) -> Connection<impl Future<Output = TcpOutcome> + use<>> {
         let connection = self.protocol.serve_tcp(io, service(application, info));
         let control = connection.control();
-        Ok(Connection {
+        Connection {
             future: connection.run(),
             control,
-        })
+        }
     }
 }
+
+pub(super) type TcpOutcome = Result<
+    ConnectionOutcome<<TcpStream as IntoOwnedSplit>::ReadHalf, <TcpStream as IntoOwnedSplit>::WriteHalf>,
+    ConnectionError,
+>;
 
 fn service(
     application: Rc<Application>,
